@@ -1,10 +1,10 @@
 ## Catchment Tools
 
 ### Catchment Tool 1
-Downloads AGOL data to local GDB.
+[Place Info Here]
 
 ### Catchment Tool 2
-Publishes local edits back to AGOL.
+[Place Info here]
 
 ## Version History
 
