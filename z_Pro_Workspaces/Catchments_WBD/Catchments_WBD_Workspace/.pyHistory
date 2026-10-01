@@ -1,0 +1,4 @@
+﻿import arcpy  fs = arcpy.FeatureSet()  fs.load(     "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/6" )  print(fs.JSON[:200])
+import arcpy  fs = arcpy.FeatureSet()  fs.load(     "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/6" )  print(type(fs))
+arcpy.management.CopyFeatures(     fs,     r"C:\temp\test.gdb\hu12" )
+fs = arcpy.FeatureSet()  fs.load(     "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/6/query?where=1%3D1&outFields=*&f=json" )
