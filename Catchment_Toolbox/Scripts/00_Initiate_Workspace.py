@@ -21,10 +21,6 @@ import json
 import urllib.parse
 import urllib.request
 
-arcpy.AddMessage(
-    f"Using utils.py: {utils.__file__}"
-)
-
 # =============================================================================
 # WORKSPACE SETUP
 # =============================================================================
@@ -224,146 +220,164 @@ def create_project_boundary(
 # =============================================================================
 
 def export_wbd_layer(
-service_url,
-dpa_fc,
-output_fc):
-"""
-Query WBD service using DPA extent.
-Only matching features are downloaded.
-"""
+        service_url,
+        dpa_fc,
+        output_fc,
+        scratch_gdb):
+    """
+    Query WBD service using DPA geometry,
+    then apply local HAVE_THEIR_CENTER_IN filtering.
 
-output_name = os.path.basename(
-output_fc
-)
+    This reproduces ArcGIS Pro's
+    'Have Their Center In' behavior while
+    minimizing data downloaded from USGS.
+    """
 
-utils.msg(
-f"Downloading {output_name}..."
-)
+    output_name = os.path.basename(
+        output_fc
+    )
 
-utils.delete_if_exists(
-output_fc
-)
+    query_fc = os.path.join(
+        scratch_gdb,
+        f"qry_{output_name}"
+    )
 
-# ---------------------------------------------------------
-# Build extent from projected DPA
-# ---------------------------------------------------------
+    layer_name = (
+        f"{output_name}_lyr"
+    )
 
-extent = arcpy.Describe(
-dpa_fc
-).extent
+    utils.msg(
+        f"Retrieving {output_name}..."
+    )
 
-geom = {
-"xmin": extent.XMin,
-"ymin": extent.YMin,
-"xmax": extent.XMax,
-"ymax": extent.YMax,
-"spatialReference": {
-"wkid": arcpy.Describe(
-dpa_fc
-).spatialReference.factoryCode
-}
-}
+    utils.delete_if_exists(
+        query_fc
+    )
 
-# ---------------------------------------------------------
-# Build REST query
-# ---------------------------------------------------------
+    utils.delete_if_exists(
+        output_fc
+    )
 
-params = {
-"where": "1=1",
-"geometry": json.dumps(geom),
-"geometryType": "esriGeometryEnvelope",
-"spatialRel": "esriSpatialRelIntersects",
-"returnGeometry": "true",
-"outFields": "*",
-"f": "json"
-}
+    # -------------------------------------------------------------
+    # Get DPA geometry
+    # -------------------------------------------------------------
 
-query_url = (
-service_url +
-"/query?" +
-urllib.parse.urlencode(params)
-)
+    with arcpy.da.SearchCursor(
+            dpa_fc,
+            ["SHAPE@"]) as cursor:
 
-# ---------------------------------------------------------
-# Load result into FeatureSet
-# ---------------------------------------------------------
+        geometries = [
+            row[0]
+            for row in cursor
+        ]
 
-fs = arcpy.FeatureSet()
+    if not geometries:
 
-fs.load(
-query_url
-)
+        raise ValueError(
+            "DPA contains no geometry."
+        )
 
-result_count = len(
-json.loads(fs.JSON)["features"]
-)
+    dpa_geom = geometries[0]
 
-utils.msg(
-f"Downloaded {result_count:,} features."
-)
+    for geom in geometries[1:]:
 
-# ---------------------------------------------------------
-# Write to GDB
-# ---------------------------------------------------------
+        dpa_geom = dpa_geom.union(
+            geom
+        )
 
-arcpy.management.CopyFeatures(
-fs,
-output_fc
-)
+    # -------------------------------------------------------------
+    # Build REST query
+    # -------------------------------------------------------------
 
-# ---------------------------------------------------------
-# Final refinement
-# ---------------------------------------------------------
+    params = {
+        "where": "1=1",
+        "geometry": dpa_geom.JSON,
+        "geometryType": "esriGeometryPolygon",
+        "inSR": dpa_geom.spatialReference.factoryCode,
+        "spatialRel": "esriSpatialRelIntersects",
+        "returnGeometry": "true",
+        "outFields": "*",
+        "f": "json"
+    }
 
-layer_name = (
-f"{output_name}_lyr"
-)
+    query_url = (
+        f"{service_url}/query?"
+        f"{urllib.parse.urlencode(params)}"
+    )
 
-arcpy.management.MakeFeatureLayer(
-output_fc,
-layer_name
-)
+    utils.msg(
+        "Submitting REST query..."
+    )
 
-arcpy.management.SelectLayerByLocation(
-in_layer=layer_name,
-overlap_type="HAVE_THEIR_CENTER_IN",
-select_features=dpa_fc,
-selection_type="NEW_SELECTION"
-)
+    # -------------------------------------------------------------
+    # Load query results
+    # -------------------------------------------------------------
 
-refined_fc = (
-output_fc + "_tmp"
-)
+    fs = arcpy.FeatureSet()
 
-utils.delete_if_exists(
-refined_fc
-)
+    fs.load(
+        query_url
+    )
 
-arcpy.management.CopyFeatures(
-layer_name,
-refined_fc
-)
+    arcpy.management.CopyFeatures(
+        fs,
+        query_fc
+    )
 
-arcpy.management.Delete(
-output_fc
-)
+    candidate_count = utils.get_count(
+        query_fc
+    )
 
-arcpy.management.Rename(
-refined_fc,
-output_fc
-)
+    utils.msg(
+        f"{candidate_count:,} candidate "
+        f"features returned."
+    )
 
-final_count = utils.get_count(
-output_fc
-)
+    # -------------------------------------------------------------
+    # Apply centroid filtering locally
+    # -------------------------------------------------------------
 
-utils.msg(
-f"{output_name}: {final_count:,} selected."
-)
+    arcpy.management.MakeFeatureLayer(
+        query_fc,
+        layer_name
+    )
 
-arcpy.management.Delete(
-layer_name
-)
+    arcpy.management.SelectLayerByLocation(
+        in_layer=layer_name,
+        overlap_type="HAVE_THEIR_CENTER_IN",
+        select_features=dpa_fc,
+        selection_type="NEW_SELECTION"
+    )
+
+    selected_count = utils.get_count(
+        layer_name
+    )
+
+    utils.msg(
+        f"{selected_count:,} features "
+        f"passed centroid selection."
+    )
+
+    arcpy.management.CopyFeatures(
+        layer_name,
+        output_fc
+    )
+
+    # -------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------
+
+    utils.delete_if_exists(
+        query_fc
+    )
+
+    arcpy.management.Delete(
+        layer_name
+    )
+
+    utils.msg(
+        f"{output_name} created."
+    )
 
 
 # =============================================================================
