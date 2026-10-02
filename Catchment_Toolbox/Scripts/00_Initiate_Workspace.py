@@ -19,14 +19,12 @@ import arcpy
 import catchment_utils as utils
 import json
 import urllib.parse
-import urllib.request
 
 # =============================================================================
 # WORKSPACE SETUP
 # =============================================================================
 
 def copy_template_structure(user_workspace):
-    """Copy template folder structure."""
 
     utils.msg("Copying workflow template structure...")
 
@@ -36,9 +34,6 @@ def copy_template_structure(user_workspace):
         dirs_exist_ok=True
     )
 
-    utils.msg("Template structure copied.")
-
-
 def create_inputs_gdb(user_workspace):
     """Create Inputs.gdb."""
 
@@ -47,8 +42,6 @@ def create_inputs_gdb(user_workspace):
     )
 
     if not arcpy.Exists(inputs_gdb):
-
-        utils.msg("Creating Inputs.gdb...")
 
         arcpy.management.CreateFileGDB(
             utils.get_input_folder(user_workspace),
@@ -73,8 +66,6 @@ def create_scratch_gdb(user_workspace):
 
     if not arcpy.Exists(scratch_gdb):
 
-        utils.msg("Creating Scratch.gdb...")
-
         arcpy.management.CreateFileGDB(
             utils.get_input_folder(user_workspace),
             "Scratch.gdb"
@@ -93,39 +84,6 @@ def create_scratch_gdb(user_workspace):
 # EDH GDB
 # =============================================================================
 
-def validate_edh_gdb(edh_gdb):
-    """
-    Verify the EDH GDB contains required feature classes.
-    """
-
-    utils.msg(
-        "Validating EDH geodatabase..."
-    )
-
-    required_fc = [
-        "Lines",
-        "Points",
-        "Polygons"
-    ]
-
-    for fc in required_fc:
-
-        fc_path = os.path.join(
-            edh_gdb,
-            fc
-        )
-
-        if not arcpy.Exists(fc_path):
-
-            raise ValueError(
-                f"Required feature class not found: {fc}"
-            )
-
-    utils.msg(
-        "EDH geodatabase validated."
-    )
-
-
 def copy_edh_gdb(
         source_gdb,
         target_gdb):
@@ -138,7 +96,6 @@ def copy_edh_gdb(
     )
 
     if arcpy.Exists(target_gdb):
-
         arcpy.management.Delete(
             target_gdb
         )
@@ -146,10 +103,6 @@ def copy_edh_gdb(
     arcpy.management.Copy(
         source_gdb,
         target_gdb
-    )
-
-    utils.msg(
-        "EDH geodatabase copied."
     )
 
 
@@ -164,10 +117,6 @@ def import_dpa(
     Import DPA using project CRS environment.
     """
 
-    utils.msg(
-        "Importing DPA..."
-    )
-
     utils.delete_if_exists(
         dpa_output
     )
@@ -175,43 +124,6 @@ def import_dpa(
     arcpy.management.CopyFeatures(
         dpa_input,
         dpa_output
-    )
-
-    count = utils.get_count(
-        dpa_output
-    )
-
-    utils.msg(
-        f"DPA imported ({count:,} features)."
-    )
-
-
-# =============================================================================
-# PROJECT BOUNDARY
-# =============================================================================
-
-def create_project_boundary(
-        dpa_fc,
-        boundary_fc):
-    """
-    Create dissolved project boundary.
-    """
-
-    utils.msg(
-        "Creating Project_Boundary..."
-    )
-
-    utils.delete_if_exists(
-        boundary_fc
-    )
-
-    arcpy.management.Dissolve(
-        dpa_fc,
-        boundary_fc
-    )
-
-    utils.msg(
-        "Project_Boundary created."
     )
 
 
@@ -259,41 +171,28 @@ def export_wbd_layer(
     )
 
     # -------------------------------------------------------------
-    # Get DPA geometry
+    # Build extent-based REST query
     # -------------------------------------------------------------
 
-    with arcpy.da.SearchCursor(
-            dpa_fc,
-            ["SHAPE@"]) as cursor:
+    desc = arcpy.Describe(dpa_fc)
 
-        geometries = [
-            row[0]
-            for row in cursor
-        ]
-
-    if not geometries:
-
-        raise ValueError(
-            "DPA contains no geometry."
-        )
-
-    dpa_geom = geometries[0]
-
-    for geom in geometries[1:]:
-
-        dpa_geom = dpa_geom.union(
-            geom
-        )
-
-    # -------------------------------------------------------------
-    # Build REST query
-    # -------------------------------------------------------------
+    extent = desc.extent
 
     params = {
         "where": "1=1",
-        "geometry": dpa_geom.JSON,
-        "geometryType": "esriGeometryPolygon",
-        "inSR": dpa_geom.spatialReference.factoryCode,
+        "geometry": json.dumps(
+            {
+                "xmin": extent.XMin,
+                "ymin": extent.YMin,
+                "xmax": extent.XMax,
+                "ymax": extent.YMax,
+                "spatialReference": {
+                    "wkid": desc.spatialReference.factoryCode
+                }
+            }
+        ),
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": desc.spatialReference.factoryCode,
         "spatialRel": "esriSpatialRelIntersects",
         "returnGeometry": "true",
         "outFields": "*",
@@ -303,10 +202,6 @@ def export_wbd_layer(
     query_url = (
         f"{service_url}/query?"
         f"{urllib.parse.urlencode(params)}"
-    )
-
-    utils.msg(
-        "Submitting REST query..."
     )
 
     # -------------------------------------------------------------
@@ -322,15 +217,6 @@ def export_wbd_layer(
     arcpy.management.CopyFeatures(
         fs,
         query_fc
-    )
-
-    candidate_count = utils.get_count(
-        query_fc
-    )
-
-    utils.msg(
-        f"{candidate_count:,} candidate "
-        f"features returned."
     )
 
     # -------------------------------------------------------------
@@ -349,15 +235,6 @@ def export_wbd_layer(
         selection_type="NEW_SELECTION"
     )
 
-    selected_count = utils.get_count(
-        layer_name
-    )
-
-    utils.msg(
-        f"{selected_count:,} features "
-        f"passed centroid selection."
-    )
-
     arcpy.management.CopyFeatures(
         layer_name,
         output_fc
@@ -373,10 +250,6 @@ def export_wbd_layer(
 
     arcpy.management.Delete(
         layer_name
-    )
-
-    utils.msg(
-        f"{output_name} created."
     )
 
 

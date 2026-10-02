@@ -1,0 +1,28 @@
+﻿<?xml version="1.0" encoding="utf-8"?><messages><msg code="0" type="2">Start Time: Friday, October 2, 2026 8:08:51 AM</msg><msg code="0" type="0">[08:08:51] Validating EDH geodatabase...</msg><msg code="0" type="0">[08:08:51] EDH geodatabase validated.</msg><msg code="0" type="0">[08:08:51] ======================================================================</msg><msg code="0" type="0">[08:08:51] Catchment Toolbox - 00 Initiate Workspace</msg><msg code="0" type="0">[08:08:51] ======================================================================</msg><msg code="0" type="0">[08:08:51] Locale: CONUS</msg><msg code="0" type="0">[08:08:51] Output WKID: 6350</msg><msg code="0" type="0">[08:08:51] Copying workflow template structure...</msg><msg code="0" type="0">[08:08:51] Template structure copied.</msg><msg code="0" type="0">[08:08:51] Creating Inputs.gdb...</msg><msg code="0" type="0">[08:08:51] Creating Scratch.gdb...</msg><msg code="0" type="0">[08:08:51] Copying EDH geodatabase...</msg><msg code="0" type="0">[08:08:52] EDH geodatabase copied.</msg><msg code="0" type="0">[08:08:52] Importing DPA...</msg><msg code="0" type="0">[08:08:52] DPA imported (1 features).</msg><msg code="0" type="0">[08:08:52] Retrieving Existing_WBDHU12...</msg><msg code="0" type="0">[08:08:52] Submitting REST query...</msg><msg code="-2147467259" type="100">Traceback (most recent call last):
+﻿  File "C:\Users\Jimmy.Monge\Documents\!Script_Copies\!_Toolboxes\Catchment_Toolbox\Scripts\00_Initiate_Workspace.py", line 564, in &lt;module&gt;
+    main()
+    ^^
+﻿  File "C:\Users\Jimmy.Monge\Documents\!Script_Copies\!_Toolboxes\Catchment_Toolbox\Scripts\00_Initiate_Workspace.py", line 521, in main
+    export_wbd_layer(
+    ~~~~~~~~~~~~~~~~^
+        service_url=utils.WBD_HU12_URL,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...&lt;2 lines&gt;...
+        scratch_gdb=scratch_gdb
+        ^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+﻿  File "C:\Users\Jimmy.Monge\Documents\!Script_Copies\!_Toolboxes\Catchment_Toolbox\Scripts\00_Initiate_Workspace.py", line 318, in export_wbd_layer
+    fs.load(
+    ~~~~~~~^
+        query_url
+        ^^^^^^^^^
+    )
+    ^
+﻿  File "C:\Program Files\ArcGIS\Pro\Resources\ArcPy\arcpy\arcobjects\arcobjects.py", line 477, in load
+    return convertArcObjectToPythonObject(self._arc_object.Load(*gp_fixargs(args),
+                                          ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+                                                                **gp_fixkwargs(kwargs)))
+                                                                ^^^^^^^^^^^^^^^^^^^^^^^
+﻿RuntimeError: RecordSetObject: Cannot open table for Load
+﻿</msg><msg code="0" type="0">Failed script 01 Initiate Workspace...</msg><msg code="-2147467259" type="100">Failed to execute (InitiateWorkspace).</msg><msg code="0" type="3">Failed at Friday, October 2, 2026 8:10:14 AM (Elapsed Time: 1 minutes 23 seconds)</msg></messages>
