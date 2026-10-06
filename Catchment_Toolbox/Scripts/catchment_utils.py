@@ -65,7 +65,7 @@ def err(text):
 
 def separator():
 
-    msg("=" * 70)
+    arcpy.AddMessage("=" * 70)
 
 
 # =============================================================================
@@ -115,6 +115,13 @@ def get_pourpoints_folder(workspace):
         "01_PourPoints"
     )
 
+def get_pourpoints_gdb(workspace):
+
+    return os.path.join(
+        workspace,
+        "01_PourPoints",
+        "PourPoints.gdb"
+    )
 
 def get_hrt_folder(workspace):
 
@@ -129,14 +136,6 @@ def get_scratch_gdb(workspace):
         workspace,
         "00_EDH_Inputs",
         "Scratch.gdb"
-    )
-
-def get_edh_gdb(workspace):
-
-    return os.path.join(
-        workspace,
-        "00_EDH_Inputs",
-        "EDH.gdb"
     )
 
 # =============================================================================

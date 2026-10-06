@@ -128,6 +128,221 @@ def import_dpa(
 
 
 # =============================================================================
+# CREATE OUTSIDE LINES
+# =============================================================================
+
+def create_headwater_points(
+        outside_flowlines,
+        scratch_gdb):
+    """
+    Create headwater points from a flowline network.
+
+    Headwater points are defined as:
+
+        Start Points
+            MINUS
+        End Points
+    """
+
+    start_pts = os.path.join(
+        scratch_gdb,
+        "Start_Points"
+    )
+
+    end_pts = os.path.join(
+        scratch_gdb,
+        "End_Points"
+    )
+
+    headwater_pts = os.path.join(
+        scratch_gdb,
+        "Headwater_Points"
+    )
+
+    utils.delete_if_exists(
+        start_pts
+    )
+
+    utils.delete_if_exists(
+        end_pts
+    )
+
+    utils.delete_if_exists(
+        headwater_pts
+    )
+
+    arcpy.management.FeatureVerticesToPoints(
+        outside_flowlines,
+        start_pts,
+        "START"
+    )
+
+    arcpy.management.FeatureVerticesToPoints(
+        outside_flowlines,
+        end_pts,
+        "END"
+    )
+
+    arcpy.analysis.Erase(
+        start_pts,
+        end_pts,
+        headwater_pts
+    )
+
+    utils.delete_if_exists(
+        start_pts
+    )
+
+    utils.delete_if_exists(
+        end_pts
+    )
+
+    return headwater_pts
+
+def prepare_outside_lines(
+        dpa_fc,
+        reference_flowlines,
+        scratch_gdb):
+    """
+    Creates a 1000 m exterior ring around the DPA and
+    extracts reference flowlines falling within that ring.
+
+    Returns:
+        Outside_Reference_Flowlines feature class
+    """
+
+    # -------------------------------------------------------------------------
+    # Paths
+    # -------------------------------------------------------------------------
+
+    dpa_buffer = os.path.join(
+        scratch_gdb,
+        "DPA_Buffer_1000m"
+    )
+
+    dpa_ring = os.path.join(
+        scratch_gdb,
+        "DPA_Ring_1000m"
+    )
+
+    merged_flowlines = os.path.join(
+        scratch_gdb,
+        "Merged_Reference_Flowlines"
+    )
+
+    outside_flowlines = os.path.join(
+        scratch_gdb,
+        "Outside_Reference_Flowlines"
+    )
+
+    outside_flowlines_sp = os.path.join(
+        scratch_gdb,
+        "Outside_Reference_Flowlines_SP"
+    )
+
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+
+    utils.delete_if_exists(
+        dpa_buffer
+    )
+
+    utils.delete_if_exists(
+        dpa_ring
+    )
+
+    utils.delete_if_exists(
+        merged_flowlines
+    )
+
+    utils.delete_if_exists(
+        outside_flowlines
+    )
+
+    utils.delete_if_exists(
+        outside_flowlines_sp
+    )
+
+    # -------------------------------------------------------------------------
+    # Create 1000 m DPA buffer
+    # -------------------------------------------------------------------------
+
+    arcpy.analysis.Buffer(
+        in_features=dpa_fc,
+        out_feature_class=dpa_buffer,
+        buffer_distance_or_field="1000 Meters",
+        dissolve_option="ALL",
+        method="PLANAR"
+    )
+
+    # -------------------------------------------------------------------------
+    # Remove original DPA to create ring
+    # -------------------------------------------------------------------------
+
+    arcpy.analysis.Erase(
+        in_features=dpa_buffer,
+        erase_features=dpa_fc,
+        out_feature_class=dpa_ring
+    )
+
+    # -------------------------------------------------------------------------
+    # Handle single vs multiple flowline inputs
+    # -------------------------------------------------------------------------
+
+    flowline_list = [
+        fc.strip()
+        for fc in reference_flowlines.split(";")
+        if fc.strip()
+    ]
+
+    if len(flowline_list) == 0:
+
+        raise ValueError(
+            "No Reference_Flowlines were supplied."
+        )
+
+    elif len(flowline_list) == 1:
+
+        arcpy.management.CopyFeatures(
+            flowline_list[0],
+            merged_flowlines
+        )
+
+    else:
+
+        arcpy.management.Merge(
+            flowline_list,
+            merged_flowlines
+        )
+
+    # -------------------------------------------------------------------------
+    # Clip flowlines to DPA ring
+    # -------------------------------------------------------------------------
+
+    arcpy.analysis.Clip(
+        in_features=merged_flowlines,
+        clip_features=dpa_ring,
+        out_feature_class=outside_flowlines
+    )
+
+    arcpy.management.MultipartToSinglepart(
+        outside_flowlines,
+        outside_flowlines_sp
+    )
+
+    headwater_points = create_headwater_points(
+        outside_flowlines_sp,
+        scratch_gdb
+    )
+
+    return (
+        outside_flowlines_sp,
+        headwater_points
+    )
+
+
+# =============================================================================
 # WBD EXPORTS
 # =============================================================================
 
@@ -176,7 +391,23 @@ def export_wbd_layer(
 
     desc = arcpy.Describe(dpa_fc)
 
-    extent = desc.extent
+    wgs84 = arcpy.SpatialReference(4326)
+
+    extent_poly = arcpy.Polygon(
+        arcpy.Array([
+            arcpy.Point(desc.extent.XMin, desc.extent.YMin),
+            arcpy.Point(desc.extent.XMin, desc.extent.YMax),
+            arcpy.Point(desc.extent.XMax, desc.extent.YMax),
+            arcpy.Point(desc.extent.XMax, desc.extent.YMin)
+        ]),
+        desc.spatialReference
+    )
+
+    extent_poly = extent_poly.projectAs(
+        wgs84
+    )
+
+    extent = extent_poly.extent
 
     params = {
         "where": "1=1",
@@ -187,12 +418,12 @@ def export_wbd_layer(
                 "xmax": extent.XMax,
                 "ymax": extent.YMax,
                 "spatialReference": {
-                    "wkid": desc.spatialReference.factoryCode
+                    "wkid": 4326
                 }
             }
         ),
         "geometryType": "esriGeometryEnvelope",
-        "inSR": desc.spatialReference.factoryCode,
+        "inSR": 4326,
         "spatialRel": "esriSpatialRelIntersects",
         "returnGeometry": "true",
         "outFields": "*",
@@ -210,14 +441,22 @@ def export_wbd_layer(
 
     fs = arcpy.FeatureSet()
 
+    utils.msg(query_url)
+
+    utils.msg("Creating FeatureSet...")
+
     fs.load(
         query_url
     )
+
+    utils.msg("FeatureSet loaded.")
 
     arcpy.management.CopyFeatures(
         fs,
         query_fc
     )
+
+    utils.msg("CopyFeatures complete.")
 
     # -------------------------------------------------------------
     # Apply centroid filtering locally
@@ -269,24 +508,7 @@ def main():
     edh_gdb = arcpy.GetParameterAsText(1)
     dpa_shape = arcpy.GetParameterAsText(2)
     locale = arcpy.GetParameterAsText(3)
-
-    # -------------------------------------------------------------------------
-    # VALIDATION
-    # -------------------------------------------------------------------------
-
-    validate_edh_gdb(
-        edh_gdb
-    )
-
-    desc = arcpy.Describe(
-        dpa_shape
-    )
-
-    if desc.shapeType != "Polygon":
-
-        raise ValueError(
-            "DPA Shape must be polygon geometry."
-        )
+    reference_flowlines = arcpy.GetParameterAsText(4)
 
     # -------------------------------------------------------------------------
     # SPATIAL REFERENCE
@@ -308,7 +530,7 @@ def main():
 
     utils.separator()
 
-    utils.msg(
+    arcpy.AddMessage(
         "Catchment Toolbox - 00 Initiate Workspace"
     )
 
@@ -316,11 +538,6 @@ def main():
 
     utils.msg(
         f"Locale: {locale}"
-    )
-
-    utils.msg(
-        f"Output WKID: "
-        f"{spatial_reference.factoryCode}"
     )
 
     # -------------------------------------------------------------------------
@@ -343,8 +560,13 @@ def main():
     # COPY EDH GDB
     # -------------------------------------------------------------------------
 
-    project_edh_gdb = utils.get_edh_gdb(
-        user_workspace
+    edh_name = os.path.basename(
+        edh_gdb
+    )
+
+    project_edh_gdb = os.path.join(
+        utils.get_input_folder(user_workspace),
+        edh_name
     )
 
     copy_edh_gdb(
@@ -388,6 +610,18 @@ def main():
     )
 
     # -------------------------------------------------------------------------
+    # CREATE OUTSIDE LINES
+    # -------------------------------------------------------------------------
+
+    outside_reference_flowlines, headwater_points = (
+        prepare_outside_lines(
+            dpa_fc=dpa_fc,
+            reference_flowlines=reference_flowlines,
+            scratch_gdb=scratch_gdb
+        )
+    )
+
+    # -------------------------------------------------------------------------
     # EXPORT HUC12
     # -------------------------------------------------------------------------
 
@@ -426,7 +660,7 @@ def main():
 
     utils.separator()
 
-    utils.msg(
+    arcpy.AddMessage(
         "Workspace initialization completed successfully."
     )
 
