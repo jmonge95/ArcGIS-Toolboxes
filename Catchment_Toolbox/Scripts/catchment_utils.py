@@ -26,10 +26,13 @@ WBD_HU8_URL = (
     "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/4"
 )
 
+WBD_Line_URL = (
+    "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/0"
+)
+
 TEMPLATE_DIRECTORY = (
-    r"C:\Users\Jimmy.Monge\Documents\!Script_Copies"
-    r"\!_Toolboxes\z_Pro_Workspaces"
-    r"\Catchments_WBD\Workflow_Directory_TEMPLATE"
+    r"C:\Users\Jimmy.Monge\Documents\!Script_Copies\!_Toolbox_Workspaces"
+    r"\z_Pro_Workspaces\Catchments_WBD\Workflow_Directory_TEMPLATE"
 )
 
 # =============================================================================
@@ -169,11 +172,11 @@ def get_count(dataset):
 # STANDARD PROJECT DATASETS
 # =============================================================================
 
-def get_dpa_fc(workspace):
+def get_iwub_fc(workspace):
 
     return os.path.join(
         get_inputs_gdb(workspace),
-        "DPA"
+        "IWUB"
     )
 
 
@@ -198,4 +201,11 @@ def get_huc8_fc(workspace):
     return os.path.join(
         get_inputs_gdb(workspace),
         "Existing_WBDHU8"
+    )
+
+def get_wbd_lines_fc(user_workspace):
+
+    return os.path.join(
+        get_inputs_gdb(user_workspace),
+        "Existing_WBDLines"
     )

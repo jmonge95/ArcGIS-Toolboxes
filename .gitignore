@@ -1,0 +1,29 @@
+# ArcGIS Pro
+.pyHistory
+GpMessages/
+ImportLog/
+Index/
+
+# Scratch geodatabases
+**/Scratch.gdb/
+**/Scratch.gdb/**
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# ArcGIS locks
+*.lock
+*.sr.lock
+
+# Pro workspaces
+z_Pro_Workspaces/
+
+# IDE files
+.idea/
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
