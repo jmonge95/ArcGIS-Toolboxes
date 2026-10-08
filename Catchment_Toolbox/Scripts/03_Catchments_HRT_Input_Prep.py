@@ -1,219 +1,342 @@
-import arcpy
+"""
+03_Prepare_HRT_Inputs.py
+
+Catchment Toolbox
+
+Purpose:
+    Prepare HU12-specific stream and waterbody
+    datasets for HRT processing.
+"""
+
 import os
-import timeit
+import arcpy
+import catchment_utils as utils
 
 arcpy.env.overwriteOutput = True
 
-"""
 
-This script prepares HU12-specific waterbody and flowline datasets
-for HRT processing.
+# =============================================================================
+# WATERBODIES
+# =============================================================================
 
-Waterbodies:
-    - Select all polygon features whose center falls within the HU12.
-    - Convert FCode 43600 to 39000.
-    - Export to 02_HRT_Inputs\\Waterbodies.
+def export_waterbodies(
+        polygons_fc,
+        hu12_geom,
+        huc12,
+        output_folder):
+    """
+    Export HU12 waterbodies.
+    """
 
-Flowlines:
-    - Select subnetworks near HU12 start and stop points.
-    - Add flowlines within 250 meters of the HU12 boundary.
-    - Retain selected flowlines within 500 meters of the HU12 boundary.
-    - Remove flowlines identical to the HU12 network.
-    - Merge subnetworks with the HU12 network.
-    - Export to 02_HRT_Inputs\\Streams.
+    utils.msg(
+        f"Creating waterbodies for {huc12}..."
+    )
 
-"""
+    output_fc = os.path.join(
+        output_folder,
+        f"{huc12}.shp"
+    )
 
-""" BEGIN CHANGING INPUTS """
+    utils.delete_if_exists(
+        output_fc
+    )
 
-HUshp = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment\00_EDH_Inputs\MA_Narragansett_D25_H_HU12s.shp"
-fieldlist = ["HUC12"]
-edh_gdb = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment\00_EDH_Inputs\301183_edh.gdb"
-working_directory = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment"
+    arcpy.management.MakeFeatureLayer(
+        polygons_fc,
+        "polygons_lyr"
+    )
 
-""" END CHANGING INPUTS """
+    arcpy.management.SelectLayerByLocation(
+        "polygons_lyr",
+        "HAVE_THEIR_CENTER_IN",
+        hu12_geom
+    )
 
-# --------------------------------------------------------------------------
-# START TIMER
-# --------------------------------------------------------------------------
+    arcpy.management.CopyFeatures(
+        "polygons_lyr",
+        output_fc
+    )
 
-overall_start = timeit.default_timer()
+    if "FCode" in [
+            f.name for f in arcpy.ListFields(
+                output_fc
+            )
+    ]:
 
-# --------------------------------------------------------------------------
-# PROCESS EACH HU12
-# --------------------------------------------------------------------------
+        with arcpy.da.UpdateCursor(
+                output_fc,
+                ["FCode"]
+        ) as cursor:
 
-with arcpy.da.SearchCursor(HUshp, fieldlist + ["SHAPE@"]) as cursor:
+            for row in cursor:
 
-    for row in cursor:
+                if row[0] == 43600:
 
-        HUnum = row[0]
-        hu12_shape = row[1]
+                    row[0] = 39000
 
-        print(f"Starting {HUnum}...")
+                    cursor.updateRow(
+                        row
+                    )
 
-        # ------------------------------------------------------------------
-        # PREPARE WATERBODIES
-        # ------------------------------------------------------------------
+    arcpy.management.Delete(
+        "polygons_lyr"
+    )
 
-        print(f"        Selecting waterbodies within {HUnum}...")
 
-        polygons_layer = "Polygons_Layer"
+# =============================================================================
+# STREAMS
+# =============================================================================
 
-        arcpy.MakeFeatureLayer_management(
-            os.path.join(edh_gdb, "Polygons"),
-            polygons_layer
+def export_streams(
+        merged_flowlines_fc,
+        hu_network_fc,
+        pourpoints_fc,
+        hu12_geom,
+        huc12,
+        output_folder):
+    """
+    Export HU12 stream network and
+    connected subnetworks.
+    """
+
+    utils.msg(
+        f"Creating streams for {huc12}..."
+    )
+
+    output_fc = os.path.join(
+        output_folder,
+        f"{huc12}.shp"
+    )
+
+    utils.delete_if_exists(
+        output_fc
+    )
+
+    arcpy.management.MakeFeatureLayer(
+        merged_flowlines_fc,
+        "flowlines_lyr"
+    )
+
+    huc_field = arcpy.AddFieldDelimiters(
+        pourpoints_fc,
+        "HUC12"
+    )
+
+    start_sql = (
+        f"{huc_field} = '{huc12}'"
+    )
+
+    stop_sql = (
+        f"{huc_field} <> '{huc12}'"
+    )
+
+    arcpy.management.MakeFeatureLayer(
+        pourpoints_fc,
+        "start_pts",
+        start_sql
+    )
+
+    arcpy.management.MakeFeatureLayer(
+        pourpoints_fc,
+        "stop_pts",
+        stop_sql
+    )
+
+    # ---------------------------------------------------------
+    # Select nearby subnetworks
+    # ---------------------------------------------------------
+
+    arcpy.management.SelectLayerByLocation(
+        "flowlines_lyr",
+        "WITHIN_A_DISTANCE",
+        "start_pts",
+        "1005 Meters"
+    )
+
+    arcpy.management.SelectLayerByLocation(
+        "flowlines_lyr",
+        "WITHIN_A_DISTANCE",
+        "stop_pts",
+        "1005 Meters",
+        "ADD_TO_SELECTION"
+    )
+
+    # ---------------------------------------------------------
+    # Add lines near HU boundary
+    # ---------------------------------------------------------
+
+    arcpy.management.SelectLayerByLocation(
+        "flowlines_lyr",
+        "WITHIN_A_DISTANCE",
+        hu12_geom,
+        "250 Meters",
+        "ADD_TO_SELECTION"
+    )
+
+    arcpy.management.SelectLayerByLocation(
+        "flowlines_lyr",
+        "WITHIN_A_DISTANCE",
+        hu12_geom,
+        "500 Meters",
+        "SUBSET_SELECTION"
+    )
+
+    # ---------------------------------------------------------
+    # Remove lines already in HU network
+    # ---------------------------------------------------------
+
+    arcpy.management.SelectLayerByLocation(
+        "flowlines_lyr",
+        "ARE_IDENTICAL_TO",
+        hu_network_fc,
+        selection_type="REMOVE_FROM_SELECTION"
+    )
+
+    # ---------------------------------------------------------
+    # Merge subnetworks + HU network
+    # ---------------------------------------------------------
+
+    temp_subnetwork = "temp_subnetwork"
+
+    utils.delete_if_exists(
+        temp_subnetwork
+    )
+
+    arcpy.management.CopyFeatures(
+        "flowlines_lyr",
+        temp_subnetwork
+    )
+
+    arcpy.management.Merge(
+        [
+            temp_subnetwork,
+            hu_network_fc
+        ],
+        output_fc
+    )
+
+    arcpy.management.Delete(
+        temp_subnetwork
+    )
+
+    arcpy.management.Delete(
+        "flowlines_lyr"
+    )
+
+    arcpy.management.Delete(
+        "start_pts"
+    )
+
+    arcpy.management.Delete(
+        "stop_pts"
+    )
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+
+    user_workspace = (
+        arcpy.GetParameterAsText(0)
+    )
+
+    polygons_fc = (
+        utils.get_edh_polygons(
+            user_workspace
         )
+    )
 
-        arcpy.SelectLayerByLocation_management(
-            polygons_layer,
-            "HAVE_THEIR_CENTER_IN",
-            hu12_shape
+    huc12_fc = (
+        utils.get_huc12_fc(
+            user_workspace
         )
+    )
 
-        output_waterbodies = os.path.join(
-            working_directory,
-            "02_HRT_Inputs",
-            "Waterbodies",
-            f"{HUnum}.shp"
+    pourpoints_fc = (
+        utils.get_pourpoints_fc(
+            user_workspace
         )
+    )
 
-        arcpy.CopyFeatures_management(
-            polygons_layer,
-            output_waterbodies
+    flowlines_gdb = (
+        utils.get_flowlines_by_huc_gdb(
+            user_workspace
         )
+    )
 
-        # Convert reservoirs (43600) to lakes (39000)
-        with arcpy.da.UpdateCursor(output_waterbodies, ["FCode"]) as update_cursor:
-            for update_row in update_cursor:
+    merged_flowlines_fc = os.path.join(
+        flowlines_gdb,
+        "MERGED_Flowlines_by_HU12"
+    )
 
-                if update_row[0] == 43600:
-                    update_row[0] = 39000
-                    update_cursor.updateRow(update_row)
-
-        print(f"        Waterbodies completed for {HUnum}...")
-
-        # ------------------------------------------------------------------
-        # PREPARE FLOWLINES
-        # ------------------------------------------------------------------
-
-        print(f"        Prepping {HUnum} flowlines for HRT processing...")
-
-        flowlines_layer = "Flowlines_Layer"
-
-        flowlines_shp = os.path.join(
-            working_directory,
-            "01_Generate_PourPoints",
-            "02_Attribution",
-            "OUTPUT_Flowlines_by_HU12.shp"
+    streams_folder = (
+        utils.get_streams_folder(
+            user_workspace
         )
+    )
 
-        arcpy.MakeFeatureLayer_management(
-            flowlines_shp,
-            flowlines_layer
+    waterbodies_folder = (
+        utils.get_waterbodies_folder(
+            user_workspace
         )
+    )
 
-        # Select subnetworks near HU12 start points
-        start_shp = os.path.join(
-            working_directory,
-            "01_Generate_PourPoints",
-            "02_Attribution",
-            "01_Starts",
-            f"{HUnum}.shp"
-        )
+    utils.separator()
 
-        arcpy.SelectLayerByLocation_management(
-            flowlines_layer,
-            "WITHIN_A_DISTANCE",
-            start_shp,
-            "500 Meters"
-        )
+    utils.msg(
+        "Catchment Toolbox - "
+        "03 Prepare HRT Inputs"
+    )
 
-        # Add subnetworks near HU12 stop points
-        stop_shp = os.path.join(
-            working_directory,
-            "01_Generate_PourPoints",
-            "02_Attribution",
-            "02_Stops",
-            f"{HUnum}.shp"
-        )
+    utils.separator()
 
-        arcpy.SelectLayerByLocation_management(
-            flowlines_layer,
-            "WITHIN_A_DISTANCE",
-            stop_shp,
-            "500 Meters",
-            "ADD_TO_SELECTION"
-        )
+    with arcpy.da.SearchCursor(
+            huc12_fc,
+            ["HUC12", "SHAPE@"]
+    ) as cursor:
 
-        # HU12 stream network
-        lines_by_HU_shp = os.path.join(
-            working_directory,
-            "01_Generate_PourPoints",
-            "02_Attribution",
-            "03_lines_by_HU",
-            f"{HUnum}.shp"
-        )
+        for huc12, hu12_geom in cursor:
 
-        # Add all flowlines within 250 m of the HU12 boundary
-        arcpy.SelectLayerByLocation_management(
-            flowlines_layer,
-            "WITHIN_A_DISTANCE",
-            hu12_shape,
-            "250 Meters",
-            "ADD_TO_SELECTION"
-        )
+            hu_network_fc = os.path.join(
+                flowlines_gdb,
+                f"HU_{huc12}"
+            )
 
-        # Retain selected flowlines within 500 m of the HU12 boundary
-        arcpy.SelectLayerByLocation_management(
-            flowlines_layer,
-            "WITHIN_A_DISTANCE",
-            hu12_shape,
-            "500 Meters",
-            "SUBSET_SELECTION"
-        )
+            if not arcpy.Exists(
+                    hu_network_fc
+            ):
 
-        # Remove flowlines already present in the HU12 network
-        arcpy.SelectLayerByLocation_management(
-            flowlines_layer,
-            "ARE_IDENTICAL_TO",
-            lines_by_HU_shp,
-            selection_type="REMOVE_FROM_SELECTION"
-        )
+                utils.warn(
+                    f"Missing HU network: "
+                    f"{huc12}"
+                )
 
-        # Merge subnetworks with the HU12 network
-        output_flowlines = os.path.join(
-            working_directory,
-            "02_HRT_Inputs",
-            "Streams",
-            f"{HUnum}.shp"
-        )
+                continue
 
-        arcpy.Merge_management(
-            [
-                flowlines_layer,
-                lines_by_HU_shp
-            ],
-            output_flowlines
-        )
+            export_waterbodies(
+                polygons_fc,
+                hu12_geom,
+                huc12,
+                waterbodies_folder
+            )
 
-        print(f"        Streams completed for {HUnum}...")
+            export_streams(
+                merged_flowlines_fc,
+                hu_network_fc,
+                pourpoints_fc,
+                hu12_geom,
+                huc12,
+                streams_folder
+            )
 
-        # ------------------------------------------------------------------
-        # CLEANUP
-        # ------------------------------------------------------------------
+    utils.separator()
 
-        if arcpy.Exists(polygons_layer):
-            arcpy.Delete_management(polygons_layer)
+    arcpy.AddMessage("HRT input preparation complete.")
 
-        if arcpy.Exists(flowlines_layer):
-            arcpy.Delete_management(flowlines_layer)
+    utils.separator()
 
-# --------------------------------------------------------------------------
-# FINISHED
-# --------------------------------------------------------------------------
 
-overall_end = timeit.default_timer()
-total_minutes = (overall_end - overall_start) / 60
-
-print(f"HRT Data Preparation completed in {total_minutes:.2f} minutes")
+if __name__ == "__main__":
+    main()

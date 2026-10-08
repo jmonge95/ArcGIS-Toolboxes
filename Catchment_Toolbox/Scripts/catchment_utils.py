@@ -251,6 +251,13 @@ def get_edh_points(user_workspace):
         "Points"
     )
 
+def get_edh_polygons(workspace):
+
+    return os.path.join(
+        get_edh_gdb(workspace),
+        "Polygons"
+    )
+
 def get_flowlines_by_huc_gdb(
         workspace):
 
@@ -268,4 +275,30 @@ def get_pourpoints_fc(
             workspace
         ),
         "PourPoints"
+    )
+
+def get_streams_folder(workspace):
+
+    return os.path.join(
+        workspace,
+        "02_HRT_Processing",
+        "B_Streams"
+    )
+
+def get_waterbodies_folder(workspace):
+
+    return os.path.join(
+        workspace,
+        "02_HRT_Processing",
+        "C_Waterbodies"
+    )
+
+def get_merged_flowlines_fc(
+        user_workspace):
+
+    return os.path.join(
+        get_flowlines_by_huc_gdb(
+            user_workspace
+        ),
+        "MERGED_Flowlines_by_HU12"
     )
