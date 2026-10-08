@@ -251,4 +251,21 @@ def get_edh_points(user_workspace):
         "Points"
     )
 
-TEST_VARIABLE = "I_EXIST"
+def get_flowlines_by_huc_gdb(
+        workspace):
+
+    return os.path.join(
+        workspace,
+        "01_PourPoints",
+        "Flowlines_By_HUC.gdb"
+    )
+
+def get_pourpoints_fc(
+        workspace):
+
+    return os.path.join(
+        get_pourpoints_gdb(
+            workspace
+        ),
+        "PourPoints"
+    )
