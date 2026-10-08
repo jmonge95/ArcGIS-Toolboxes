@@ -209,3 +209,39 @@ def get_wbd_lines_fc(user_workspace):
         get_inputs_gdb(user_workspace),
         "Existing_WBDLines"
     )
+
+def get_edh_gdb(user_workspace):
+
+    input_folder = get_input_folder(
+        user_workspace
+    )
+
+    for item in os.listdir(
+            input_folder
+    ):
+
+        if (
+                item.lower().endswith(".gdb")
+                and item.lower() != "inputs.gdb"
+                and item.lower() != "scratch.gdb"
+        ):
+
+            return os.path.join(
+                input_folder,
+                item
+            )
+
+    raise ValueError(
+        "Project EDH geodatabase not found."
+    )
+
+def get_edh_lines(user_workspace):
+
+    return os.path.join(
+        get_edh_gdb(
+            user_workspace
+        ),
+        "Lines"
+    )
+
+TEST_VARIABLE = "I_EXIST"

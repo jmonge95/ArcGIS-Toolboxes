@@ -198,34 +198,11 @@ def create_final_pour_points(
         output_fc
     )
 
-    min_elev = {}
-
-    with arcpy.da.SearchCursor(
-            z_points,
-            ["HUC12", "RASTERVALU"]
-    ) as cursor:
-
-        for huc12, elev in cursor:
-
-            if elev is None:
-                continue
-
-            if huc12 not in min_elev:
-
-                min_elev[huc12] = elev
-
-            else:
-
-                min_elev[huc12] = min(
-                    min_elev[huc12],
-                    elev
-                )
-
-    oid_list = []
-
     oid_field = arcpy.Describe(
         z_points
     ).OIDFieldName
+
+    lowest_points = {}
 
     with arcpy.da.SearchCursor(
             z_points,
@@ -239,9 +216,20 @@ def create_final_pour_points(
             if elev is None:
                 continue
 
-            if elev == min_elevoid_list.append(
-                    str(oid)
-            )
+            if (
+                huc12 not in lowest_points
+                or elev < lowest_points[huc12][1]
+            ):
+
+                lowest_points[huc12] = (
+                    oid,
+                    elev
+                )
+
+    oid_list = [
+        str(values[0])
+        for values in lowest_points.values()
+    ]
 
     if not oid_list:
 
@@ -283,7 +271,7 @@ def main():
 
     utils.separator()
 
-    utils.msg(
+    arcpy.AddMessage(
         "Catchment Toolbox - 01 Create Pour Points"
     )
 
@@ -343,7 +331,7 @@ def main():
 
     utils.separator()
 
-    utils.msg(
+    arcpy.AddMessage(
         "Pour point generation completed successfully."
     )
 
