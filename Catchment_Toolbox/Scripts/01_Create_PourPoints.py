@@ -257,6 +257,47 @@ def create_final_pour_points(
         "pourpoints_lyr"
     )
 
+def append_edh_points(
+        points_fc,
+        huc12_fc,
+        pourpoints_fc,
+        pourpoints_gdb):
+    """
+    Spatially assign HUC12 values to EDH Points
+    and append them to the PourPoints feature class.
+    """
+
+    utils.msg(
+        "Appending EDH termination points..."
+    )
+
+    points_sj = os.path.join(
+        pourpoints_gdb,
+        "Points_HUC12_SJ"
+    )
+
+    utils.delete_if_exists(
+        points_sj
+    )
+
+    arcpy.analysis.SpatialJoin(
+        target_features=points_fc,
+        join_features=huc12_fc,
+        out_feature_class=points_sj,
+        join_operation="JOIN_ONE_TO_ONE",
+        join_type="KEEP_COMMON",
+        match_option="INTERSECT"
+    )
+
+    arcpy.management.Append(
+        inputs=points_sj,
+        target=pourpoints_fc,
+        schema_type="NO_TEST"
+    )
+
+    utils.delete_if_exists(
+        points_sj
+    )
 
 # =============================================================================
 # MAIN
@@ -327,6 +368,17 @@ def main():
     create_final_pour_points(
         z_points,
         final_pourpoints
+    )
+
+    points_fc = utils.get_edh_points(
+        user_workspace
+    )
+
+    append_edh_points(
+        points_fc=points_fc,
+        huc12_fc=huc12_fc,
+        pourpoints_fc=final_pourpoints,
+        pourpoints_gdb=pourpoints_gdb
     )
 
     utils.separator()

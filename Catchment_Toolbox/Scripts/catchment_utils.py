@@ -244,4 +244,11 @@ def get_edh_lines(user_workspace):
         "Lines"
     )
 
+def get_edh_points(user_workspace):
+
+    return os.path.join(
+        get_edh_gdb(user_workspace),
+        "Points"
+    )
+
 TEST_VARIABLE = "I_EXIST"
