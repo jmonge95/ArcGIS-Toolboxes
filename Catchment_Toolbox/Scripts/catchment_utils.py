@@ -293,6 +293,54 @@ def get_waterbodies_folder(workspace):
         "C_Waterbodies"
     )
 
+def get_hrt_outputs_folder(
+        user_workspace):
+
+    return os.path.join(
+        get_hrt_folder(
+            user_workspace
+        ),
+        "E_Outputs"
+    )
+
+def get_cleanup_folder(
+        user_workspace):
+
+    return os.path.join(
+        user_workspace,
+        "03_Catchment_Cleanup"
+    )
+
+def get_cleanup_catchments_folder(
+        user_workspace):
+
+    return os.path.join(
+        get_cleanup_folder(
+            user_workspace
+        ),
+        "A_Cleaned_Catchments"
+    )
+
+def get_cleanup_qa_folder(
+        user_workspace):
+
+    return os.path.join(
+        get_cleanup_folder(
+            user_workspace
+        ),
+        "B_QA"
+    )
+
+def get_cleanup_temp_folder(
+        user_workspace):
+
+    return os.path.join(
+        get_cleanup_folder(
+            user_workspace
+        ),
+        "C_Temp"
+    )
+
 def get_merged_flowlines_fc(
         user_workspace):
 

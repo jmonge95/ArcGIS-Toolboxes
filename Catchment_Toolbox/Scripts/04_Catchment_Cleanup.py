@@ -1,373 +1,308 @@
-import arcpy
+"""
+04_Catchment_Cleanup.py
+
+Catchment Toolbox
+
+Purpose:
+    Clean HRT catchments using HUC12-attributed
+    stream ownership.
+
+Parameter:
+    0 - User Workspace
+"""
+
 import os
 import csv
 import timeit
+import arcpy
+import catchment_utils as utils
 
 arcpy.env.overwriteOutput = True
 
-"""
-
-Catchment Cleanup Workflow
-
-For each HU12:
+AMBIGUITY_DISTANCE = 10
 
 
-1. Copy {HUC12}_final_basins.shp from:
-      02_HRT_Inputs\\Outputs
-   to:
-      03_Catchment_Cleanup\\{HUC12}_final_basins_cleaned.shp
-
-2. Copy {HUC12}_prepped_streams.shp from:
-      02_HRT_Inputs\\Outputs
-   to:
-      03_Catchment_Cleanup\\{HUC12}_prepped_streams_temp.shp
-
-3. Spatially join the copied planarized streams to:
-      OUTPUT_Flowlines_by_HU12.shp
-   using:
-      SHARE_A_LINE_SEGMENT_WITH
-
-   Output:
-      {HUC12}_prepped_streams_join.shp
-
-   This transfers HUC12 ownership from the attributed flowline network to the planarized stream network.
-
-4. Join the HUC12 field from:
-      {HUC12}_prepped_streams_join.shp
-   back to
-      {HUC12}_final_basins_cleaned.shp
-   using the SID field.
-
-   Join:
-      final_basins_cleaned.sid
-         =
-      prepped_streams_join.sid
-
-5. Identify catchments that did not receive a HUC12 value through the SID join process (typically SID = -888 catchments).
-
-6. Build stream-network ownership groups:
-
-      • Primary HU12 network:
-        03_lines_by_HU\\{HUC12}.shp
-      • Neighboring subnetworks:
-        Features within
-        {HUC12}_prepped_streams_join.shp
-        whose HUC12 differs from the current HU12.
-
-7. For each catchment with a blank HUC12:
-
-      a. Calculate the centroid of the catchment polygon.
-      b. Measure the distance from the centroid to the primary HU12 stream network.
-      c. Measure the distance from the centroid to each neighboring subnetwork.
-      d. Identify the nearest subnetwork and its associated HUC12.
-      e. Assign ownership based on the closest stream network:
-            • MAIN
-                Assign current HU12
-            • SUBNETWORK
-                Assign the HUC12 of the nearest subnetwork
-            • AMBIGUOUS
-                Distances fall within the ambiguity threshold and require QA review
-
-8. Export QA datasets:
-
-      • DistanceAssigned.shp
-          Catchments assigned through the distance-based ownership method.
-      • AmbiguousCatchments.shp
-          Catchments whose ownership could not be confidently determined.
-      • RemovedCatchments.shp
-          Catchments assigned to neighboring subnetworks and scheduled for removal.
-
-9. Remove catchments whose assigned HUC12 does not match the current HU12.
-
-      • Catchments flagged as AMBIGUOUS are retained for manual review and are not automatically removed.
-
-10. Delete temporary processing datasets:
-
-      • {HUC12}_prepped_streams_temp.shp
-
-    Retain:
-
-      • {HUC12}_prepped_streams_join.shp
-
-    for QA, auditing, and troubleshooting.
-
-11. Record processing statistics and write:
-
-      • Cleanup_Summary.csv
-      • Missing_Files.csv
-
-12. Output the final cleaned catchment dataset:
-
-      03_Catchment_Cleanup\\{HUC12}_final_basins_cleaned.shp
-
-    containing only catchments associated with the primary HU12 stream network.
-
-
-"""
-
-""" Begin CHANGING INPUTS """
-
-working_directory = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment"
-HUshp = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment\00_EDH_Inputs\MA_Narragansett_D25_H_HU12s.shp"
-fieldlist = ["HUC12"]
-
-""" END CHANGING INPUTS """
-
-flowlines_by_hu = os.path.join(
-    working_directory,
-    "01_Generate_PourPoints",
-    "02_Attribution",
-    "OUTPUT_Flowlines_by_HU12.shp"
-)
-
-output_folder = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment\z_old\Outputs_new"
-
-
-cleanup_folder = r"W:\2025_MA_Narragansett_D25_H\18_WBD\catchment\z_old\Outputs_new\cleanup"
-
-qa_folder = os.path.join(
-    cleanup_folder,
-    "QA"
-)
-
-os.makedirs(cleanup_folder, exist_ok=True)
-os.makedirs(qa_folder, exist_ok=True)
-
-summary_csv = os.path.join(
-    qa_folder,
-    "Cleanup_Summary.csv"
-)
-
-missing_csv = os.path.join(
-    qa_folder,
-    "Missing_Files.csv"
-)
-
-# ------------------------------------------------------------------
+# =============================================================================
 # HELPERS
-# ------------------------------------------------------------------
+# =============================================================================
 
-def delete_dataset(dataset):
+def delete_if_exists(dataset):
+
     if arcpy.Exists(dataset):
-        arcpy.Delete_management(dataset)
 
-# ------------------------------------------------------------------
-# TRACKING
-# ------------------------------------------------------------------
-
-summary_rows = []
-missing_rows = []
-
-# ------------------------------------------------------------------
-# START TIMER
-# ------------------------------------------------------------------
-
-overall_start = timeit.default_timer()
-
-# ------------------------------------------------------------------
-# PROCESS HU12s
-# ------------------------------------------------------------------
-
-with arcpy.da.SearchCursor(HUshp, fieldlist,
-                           # where_clause="HUC12 = '010802010602'"
-                           ) as cursor:
-
-    for row in cursor:
-
-        HUnum = str(row[0])
-
-        print(f"Starting cleanup for {HUnum}...")
-
-        source_basins = os.path.join(
-            output_folder,
-            f"{HUnum}_final_basins.shp"
+        arcpy.management.Delete(
+            dataset
         )
 
-        source_streams = os.path.join(
-            output_folder,
-            f"{HUnum}_prepped_streams.shp"
+
+def ensure_folder(folder):
+
+    if not os.path.exists(folder):
+
+        os.makedirs(folder)
+
+
+# =============================================================================
+# PATHS
+# =============================================================================
+
+def initialize_paths(user_workspace):
+
+    cleanup_folder = os.path.join(
+        user_workspace,
+        "03_Catchment_Cleanup"
+    )
+
+    cleaned_folder = os.path.join(
+        cleanup_folder,
+        "A_Cleaned_Catchments"
+    )
+
+    qa_folder = os.path.join(
+        cleanup_folder,
+        "B_QA"
+    )
+
+    temp_folder = os.path.join(
+        cleanup_folder,
+        "C_Temp"
+    )
+
+    ensure_folder(cleaned_folder)
+    ensure_folder(qa_folder)
+    ensure_folder(temp_folder)
+
+    return {
+
+        "huc12_fc":
+            utils.get_huc12_fc(
+                user_workspace
+            ),
+
+        "flowlines_gdb":
+            utils.get_flowlines_by_huc_gdb(
+                user_workspace
+            ),
+
+        "merged_flowlines":
+            os.path.join(
+                utils.get_flowlines_by_huc_gdb(
+                    user_workspace
+                ),
+                "MERGED_Flowlines_by_HU12"
+            ),
+
+        "hrt_outputs":
+            os.path.join(
+                utils.get_hrt_folder(
+                    user_workspace
+                ),
+                "E_Outputs"
+            ),
+
+        "cleaned_folder":
+            cleaned_folder,
+
+        "qa_folder":
+            qa_folder,
+
+        "temp_folder":
+            temp_folder
+
+    }
+
+
+# =============================================================================
+# INPUT VALIDATION
+# =============================================================================
+
+def validate_inputs(
+        basin_fc,
+        stream_fc):
+
+    return (
+        arcpy.Exists(
+            basin_fc
         )
-
-        if not arcpy.Exists(source_basins):
-
-            print(f"    WARNING: Missing final basins for {HUnum}")
-
-            missing_rows.append(
-                [HUnum, "final_basins"]
-            )
-
-            continue
-
-        if not arcpy.Exists(source_streams):
-
-            print(f"    WARNING: Missing planarized streams for {HUnum}")
-
-            missing_rows.append(
-                [HUnum, "prepped_streams"]
-            )
-
-            continue
-
-        cleaned_basins = os.path.join(
-            cleanup_folder,
-            f"{HUnum}_final_basins_cleaned.shp"
+        and
+        arcpy.Exists(
+            stream_fc
         )
+    )
 
-        temp_streams = os.path.join(
-            cleanup_folder,
-            f"{HUnum}_prepped_streams_temp.shp"
-        )
 
-        joined_streams = os.path.join(
-            cleanup_folder,
-            f"{HUnum}_prepped_streams_join.shp"
-        )
+# =============================================================================
+# SPATIAL JOIN
+# =============================================================================
 
-        print("    Copying inputs...")
+def spatial_join_streams(
+        temp_streams,
+        merged_flowlines,
+        joined_streams):
 
-        arcpy.CopyFeatures_management(
-            source_basins,
+    delete_if_exists(
+        joined_streams
+    )
+
+    arcpy.analysis.SpatialJoin(
+        target_features=temp_streams,
+        join_features=merged_flowlines,
+        out_feature_class=joined_streams,
+        join_operation="JOIN_ONE_TO_ONE",
+        join_type="KEEP_ALL",
+        match_option="SHARE_A_LINE_SEGMENT_WITH"
+    )
+
+
+# =============================================================================
+# JOIN HUC12 TO BASINS
+# =============================================================================
+
+def join_huc12_to_basins(
+        cleaned_basins,
+        joined_streams):
+
+    existing_fields = [
+        f.name
+        for f in arcpy.ListFields(
             cleaned_basins
         )
+    ]
 
-        arcpy.CopyFeatures_management(
-            source_streams,
-            temp_streams
+    if "HUC12" in existing_fields:
+
+        arcpy.management.DeleteField(
+            cleaned_basins,
+            "HUC12"
         )
 
-        print("    Spatial joining streams...")
+    arcpy.management.JoinField(
+        cleaned_basins,
+        "sid",
+        joined_streams,
+        "sid",
+        ["HUC12"]
+    )
 
-        arcpy.analysis.SpatialJoin(
-            target_features=temp_streams,
-            join_features=flowlines_by_hu,
-            out_feature_class=joined_streams,
-            join_operation="JOIN_ONE_TO_ONE",
-            join_type="KEEP_ALL",
-            match_option="SHARE_A_LINE_SEGMENT_WITH"
-        )
 
-        print("    Joining HUC12 to catchments...")
+# =============================================================================
+# NETWORK GEOMETRIES
+# =============================================================================
 
-        arcpy.management.JoinField(
-            in_data=cleaned_basins,
-            in_field="sid",
-            join_table=joined_streams,
-            join_field="sid",
-            fields=["HUC12"]
-        )
+def get_main_network_geometries(
+        main_network_fc):
 
-        original_count = int(
-            arcpy.management.GetCount(
-                cleaned_basins
-            )[0]
-        )
+    geoms = []
 
-        # ----------------------------------------------------------
-        # ASSIGN BLANK HUC12 VALUES
-        # ----------------------------------------------------------
-
-# ----------------------------------------------------------
-        # ASSIGN BLANK HUC12 VALUES USING STREAM PROXIMITY
-        # ----------------------------------------------------------
-
-        print("    Resolving blank HUC12 values...")
-
-        existing_fields = [f.name for f in arcpy.ListFields(cleaned_basins)]
-
-        if "Assignment" not in existing_fields:
-            arcpy.management.AddField(
-                cleaned_basins,
-                "Assignment",
-                "TEXT",
-                field_length=20
-            )
-
-        if "Dist_Main" not in existing_fields:
-            arcpy.management.AddField(
-                cleaned_basins,
-                "Dist_Main",
-                "DOUBLE"
-            )
-
-        if "Dist_Sub" not in existing_fields:
-            arcpy.management.AddField(
-                cleaned_basins,
-                "Dist_Sub",
-                "DOUBLE"
-            )
-
-        # ----------------------------------------------------------
-        # BUILD MAIN NETWORK GEOMETRY
-        # ----------------------------------------------------------
-
-        main_network_shp = os.path.join(
-            working_directory,
-            "01_Generate_PourPoints",
-            "02_Attribution",
-            "03_lines_by_HU",
-            f"{HUnum}.shp"
-        )
-
-        print("    Loading main network geometries...")
-
-        main_geoms = []
-
-        with arcpy.da.SearchCursor(
-            main_network_shp,
+    with arcpy.da.SearchCursor(
+            main_network_fc,
             ["SHAPE@"]
-        ) as search_cursor:
+    ) as cursor:
 
-            for search_row in search_cursor:
+        for row in cursor:
 
-                main_geoms.append(
-                    search_row[0]
-                )
+            geoms.append(
+                row[0]
+            )
 
-        # ----------------------------------------------------------
-        # BUILD SUBNETWORK GEOMETRIES BY HUC12
-        # ----------------------------------------------------------
+    return geoms
 
-        print("    Loading subnetwork geometries...")
 
-        subnetwork_geoms = {}
+def build_subnetwork_geometries(
+        joined_streams,
+        huc12):
 
-        with arcpy.da.SearchCursor(
+    subnetworks = {}
+
+    with arcpy.da.SearchCursor(
             joined_streams,
             ["SHAPE@", "HUC12"]
-        ) as search_cursor:
+    ) as cursor:
 
-            for stream_geom, stream_huc in search_cursor:
+        for geom, sub_huc in cursor:
 
-                stream_huc = str(stream_huc).strip()
+            if sub_huc is None:
+                continue
 
-                if stream_huc == "":
-                    continue
+            sub_huc = str(
+                sub_huc
+            ).strip()
 
-                if stream_huc == HUnum:
-                    continue
+            if not sub_huc:
+                continue
 
-                if stream_huc not in subnetwork_geoms:
+            if sub_huc == huc12:
+                continue
 
-                    subnetwork_geoms[stream_huc] = []
+            subnetworks.setdefault(
+                sub_huc,
+                []
+            ).append(
+                geom
+            )
 
-                subnetwork_geoms[stream_huc].append(
-                    stream_geom
-                )
+    return subnetworks
 
-        # ----------------------------------------------------------
-        # ASSIGN BLANK HUC12 VALUES
-        # ----------------------------------------------------------
 
-        assigned_count = 0
-        ambiguous_count = 0
+# =============================================================================
+# ADD QC FIELDS
+# =============================================================================
 
-        oid_field = arcpy.Describe(
+def add_qc_fields(cleaned_basins):
+
+    existing_fields = [
+        f.name
+        for f in arcpy.ListFields(
             cleaned_basins
-        ).OIDFieldName
+        )
+    ]
 
-        distance_assigned_oids = []
+    if "Assignment" not in existing_fields:
 
-        with arcpy.da.UpdateCursor(
+        arcpy.management.AddField(
+            cleaned_basins,
+            "Assignment",
+            "TEXT",
+            field_length=20
+        )
+
+    if "Dist_Main" not in existing_fields:
+
+        arcpy.management.AddField(
+            cleaned_basins,
+            "Dist_Main",
+            "DOUBLE"
+        )
+
+    if "Dist_Sub" not in existing_fields:
+
+        arcpy.management.AddField(
+            cleaned_basins,
+            "Dist_Sub",
+            "DOUBLE"
+        )
+
+
+# =============================================================================
+# RESOLVE BLANK HUC12s
+# =============================================================================
+
+def resolve_blank_huc12s(
+        cleaned_basins,
+        huc12,
+        main_geoms,
+        subnetwork_geoms):
+
+    assigned_oids = []
+
+    assigned_count = 0
+    ambiguous_count = 0
+
+    oid_field = arcpy.Describe(
+        cleaned_basins
+    ).OIDFieldName
+
+    with arcpy.da.UpdateCursor(
             cleaned_basins,
             [
                 oid_field,
@@ -377,323 +312,568 @@ with arcpy.da.SearchCursor(HUshp, fieldlist,
                 "Dist_Main",
                 "Dist_Sub"
             ]
-        ) as update_cursor:
+    ) as cursor:
 
-            for update_row in update_cursor:
+        for row in cursor:
 
-                oid = update_row[0]
-                basin_geom = update_row[1]
+            oid = row[0]
+
+            geom = row[1]
+
+            current_huc = ""
+
+            if row[2] is not None:
 
                 current_huc = str(
-                    update_row[2]
+                    row[2]
                 ).strip()
 
-                if current_huc != "":
-                    continue
+            if current_huc:
 
-                # Use centroid instead of full polygon geometry
+                continue
 
-                basin_centroid = arcpy.PointGeometry(
-                    basin_geom.centroid,
-                    basin_geom.spatialReference
+            centroid = arcpy.PointGeometry(
+                geom.centroid,
+                geom.spatialReference
+            )
+
+            dist_main = min(
+                centroid.distanceTo(
+                    x
+                )
+                for x in main_geoms
+            )
+
+            nearest_sub_huc = None
+
+            nearest_sub_dist = float(
+                "inf"
+            )
+
+            for sub_huc, geom_list in \
+                    subnetwork_geoms.items():
+
+                dist = min(
+                    centroid.distanceTo(
+                        g
+                    )
+                    for g in geom_list
                 )
 
-                dist_main = min(
-                    basin_centroid.distanceTo(
-                        geom
-                    )
-                    for geom in main_geoms
+                if dist < nearest_sub_dist:
+
+                    nearest_sub_dist = dist
+
+                    nearest_sub_huc = sub_huc
+
+            row[4] = dist_main
+            row[5] = nearest_sub_dist
+
+            if abs(
+                    dist_main -
+                    nearest_sub_dist
+            ) < AMBIGUITY_DISTANCE:
+
+                row[3] = "AMBIGUOUS"
+
+                ambiguous_count += 1
+
+            elif dist_main < nearest_sub_dist:
+
+                row[2] = huc12
+
+                row[3] = "MAIN"
+
+                assigned_count += 1
+
+                assigned_oids.append(
+                    oid
                 )
 
-                nearest_sub_huc = None
-                nearest_sub_dist = float("inf")
+            else:
 
-                for sub_huc, geom_list in subnetwork_geoms.items():
+                row[2] = nearest_sub_huc
 
-                    test_dist = min(
-                        basin_centroid.distanceTo(
-                            geom
-                        )
-                        for geom in geom_list
-                    )
+                row[3] = "SUBNETWORK"
 
-                    if test_dist < nearest_sub_dist:
+                assigned_count += 1
 
-                        nearest_sub_dist = test_dist
-                        nearest_sub_huc = sub_huc
-
-                update_row[4] = dist_main
-                update_row[5] = nearest_sub_dist
-
-                # Ambiguous
-
-                if abs(
-                    dist_main - nearest_sub_dist
-                ) < 10:
-
-                    update_row[3] = "AMBIGUOUS"
-
-                    ambiguous_count += 1
-
-                # Main network
-
-                elif dist_main < nearest_sub_dist:
-
-                    update_row[2] = HUnum
-                    update_row[3] = "MAIN"
-
-                    assigned_count += 1
-                    distance_assigned_oids.append(
-                        oid
-                    )
-
-                # Subnetwork
-
-                else:
-
-                    update_row[2] = nearest_sub_huc
-                    update_row[3] = "SUBNETWORK"
-
-                    assigned_count += 1
-                    distance_assigned_oids.append(
-                        oid
-                    )
-
-                update_cursor.updateRow(
-                    update_row
+                assigned_oids.append(
+                    oid
                 )
 
-        print(
-            f"    Assigned {assigned_count} "
-            f"blank HUC12 values."
+            cursor.updateRow(
+                row
+            )
+
+    return (
+        assigned_count,
+        ambiguous_count,
+        assigned_oids,
+        oid_field
+    )
+
+
+# =============================================================================
+# QA EXPORTS
+# =============================================================================
+
+def export_distance_assigned(
+        cleaned_basins,
+        oid_field,
+        oid_list,
+        output_fc):
+
+    if len(oid_list) == 0:
+
+        return
+
+    lyr = "distance_lyr"
+
+    arcpy.management.MakeFeatureLayer(
+        cleaned_basins,
+        lyr
+    )
+
+    oid_string = ",".join(
+        [
+            str(x)
+            for x in oid_list
+        ]
+    )
+
+    arcpy.management.SelectLayerByAttribute(
+        lyr,
+        "NEW_SELECTION",
+        f"{oid_field} IN ({oid_string})"
+    )
+
+    delete_if_exists(
+        output_fc
+    )
+
+    arcpy.management.CopyFeatures(
+        lyr,
+        output_fc
+    )
+
+    delete_if_exists(
+        lyr
+    )
+
+
+def export_assignment(
+        cleaned_basins,
+        assignment_value,
+        output_fc):
+
+    lyr = "qa_lyr"
+
+    arcpy.management.MakeFeatureLayer(
+        cleaned_basins,
+        lyr
+    )
+
+    arcpy.management.SelectLayerByAttribute(
+        lyr,
+        "NEW_SELECTION",
+        f"Assignment = '{assignment_value}'"
+    )
+
+    count = int(
+        arcpy.management.GetCount(
+            lyr
+        )[0]
+    )
+
+    if count > 0:
+
+        delete_if_exists(
+            output_fc
         )
 
-        print(
-            f"    Found {ambiguous_count} "
-            f"ambiguous catchments."
+        arcpy.management.CopyFeatures(
+            lyr,
+            output_fc
         )
 
-        # ----------------------------------------------------------
-        # EXPORT DISTANCE-ASSIGNED CATCHMENTS
-        # ----------------------------------------------------------
+    delete_if_exists(
+        lyr
+    )
 
-        if len(distance_assigned_oids) > 0:
+# =============================================================================
+# EXPORT REMOVED CATCHMENTS
+# =============================================================================
 
-            assigned_layer = "assigned_layer"
+def export_removed_catchments(
+        cleaned_basins,
+        huc12,
+        output_fc):
+    """
+    Export the exact catchments that
+    will be removed during cleanup.
+    """
 
-            oid_string = ",".join(
-                [str(x) for x in distance_assigned_oids]
-            )
+    lyr = "removed_lyr"
 
-            arcpy.MakeFeatureLayer_management(
-                cleaned_basins,
-                assigned_layer
-            )
+    arcpy.management.MakeFeatureLayer(
+        cleaned_basins,
+        lyr
+    )
 
-            arcpy.SelectLayerByAttribute_management(
-                assigned_layer,
-                "NEW_SELECTION",
-                f"{oid_field} IN ({oid_string})"
-            )
+    arcpy.management.SelectLayerByAttribute(
+        lyr,
+        "NEW_SELECTION",
+        (
+            f"HUC12 <> '{huc12}' "
+            f"AND "
+            f"(Assignment IS NULL "
+            f"OR Assignment <> 'AMBIGUOUS')"
+        )
+    )
 
-            assigned_output = os.path.join(
-                qa_folder,
-                f"{HUnum}_AmbiguousRemovals.shp"
-            )
+    count = int(
+        arcpy.management.GetCount(
+            lyr
+        )[0]
+    )
 
-            arcpy.CopyFeatures_management(
-                assigned_layer,
-                assigned_output
-            )
+    if count > 0:
 
-            delete_dataset(
-                assigned_layer
-            )
+        delete_if_exists(
+            output_fc
+        )
 
-        # ----------------------------------------------------------
-        # EXPORT AMBIGUOUS CATCHMENTS
-        # ----------------------------------------------------------
+        arcpy.management.CopyFeatures(
+            lyr,
+            output_fc
+        )
 
-        if ambiguous_count > 0:
+    delete_if_exists(
+        lyr
+    )
 
-            ambiguous_layer = "ambiguous_layer"
+    return count
 
-            arcpy.MakeFeatureLayer_management(
-                cleaned_basins,
-                ambiguous_layer
-            )
 
-            arcpy.SelectLayerByAttribute_management(
-                ambiguous_layer,
-                "NEW_SELECTION",
-                "Assignment = 'AMBIGUOUS'"
-            )
+# =============================================================================
+# REMOVE SUBNETWORK CATCHMENTS
+# =============================================================================
 
-            ambiguous_output = os.path.join(
-                qa_folder,
-                f"{HUnum}_AmbiguousCatchments.shp"
-            )
+def remove_subnetwork_catchments(
+        cleaned_basins,
+        huc12):
 
-            arcpy.CopyFeatures_management(
-                ambiguous_layer,
-                ambiguous_output
-            )
+    removed_count = 0
 
-            delete_dataset(
-                ambiguous_layer
-            )
-
-        # ----------------------------------------------------------
-        # EXPORT REMOVED CATCHMENTS
-        # ----------------------------------------------------------
-
-        basin_layer = "basin_layer"
-
-        arcpy.MakeFeatureLayer_management(
+    with arcpy.da.UpdateCursor(
             cleaned_basins,
-            basin_layer
-        )
+            [
+                "HUC12",
+                "Assignment"
+            ]
+    ) as cursor:
 
-        arcpy.SelectLayerByAttribute_management(
-            basin_layer,
-            "NEW_SELECTION",
-            f"HUC12 <> '{HUnum}' "
-            f"AND Assignment <> 'AMBIGUOUS'"
-        )
+        for row in cursor:
 
-        removed_count = int(
-            arcpy.management.GetCount(
-                basin_layer
-            )[0]
-        )
+            basin_huc = str(
+                row[0]
+            ).strip()
 
-        if removed_count > 0:
+            assignment = str(
+                row[1]
+            ).strip()
+
+            if (
+                basin_huc != huc12
+                and
+                assignment != "AMBIGUOUS"
+            ):
+
+                cursor.deleteRow()
+
+                removed_count += 1
+
+    return removed_count
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+
+    start_time = timeit.default_timer()
+
+    user_workspace = (
+        arcpy.GetParameterAsText(
+            0
+        )
+    )
+
+    paths = initialize_paths(
+        user_workspace
+    )
+
+    summary_rows = []
+    missing_rows = []
+
+    utils.separator()
+
+    utils.msg(
+        "Catchment Toolbox - "
+        "04 Catchment Cleanup"
+    )
+
+    utils.separator()
+
+    with arcpy.da.SearchCursor(
+            paths["huc12_fc"],
+            ["HUC12"]
+    ) as cursor:
+
+        for row in cursor:
+
+            huc12 = str(
+                row[0]
+            )
+
+            utils.msg(
+                f"Processing {huc12}"
+            )
+
+            source_basins = os.path.join(
+                paths["hrt_outputs"],
+                f"{huc12}_final_basins.shp"
+            )
+
+            source_streams = os.path.join(
+                paths["hrt_outputs"],
+                f"{huc12}_prepped_streams.shp"
+            )
+
+            if not validate_inputs(
+                    source_basins,
+                    source_streams):
+
+                missing_rows.append(
+                    [huc12]
+                )
+
+                continue
+
+            cleaned_basins = os.path.join(
+                paths["cleaned_folder"],
+                f"{huc12}_final_basins_cleaned.shp"
+            )
+
+            temp_streams = os.path.join(
+                paths["temp_folder"],
+                f"{huc12}_prepped_streams_temp.shp"
+            )
+
+            joined_streams = os.path.join(
+                paths["qa_folder"],
+                f"{huc12}_prepped_streams_join.shp"
+            )
+
+            delete_if_exists(
+                cleaned_basins
+            )
+
+            delete_if_exists(
+                temp_streams
+            )
+
+            arcpy.management.CopyFeatures(
+                source_basins,
+                cleaned_basins
+            )
+
+            arcpy.management.CopyFeatures(
+                source_streams,
+                temp_streams
+            )
+
+            spatial_join_streams(
+                temp_streams,
+                paths["merged_flowlines"],
+                joined_streams
+            )
+
+            join_huc12_to_basins(
+                cleaned_basins,
+                joined_streams
+            )
+
+            add_qc_fields(
+                cleaned_basins
+            )
+
+            main_network_fc = os.path.join(
+                paths["flowlines_gdb"],
+                f"HU_{huc12}"
+            )
+
+            main_geoms = (
+                get_main_network_geometries(
+                    main_network_fc
+                )
+            )
+
+            subnetworks = (
+                build_subnetwork_geometries(
+                    joined_streams,
+                    huc12
+                )
+            )
+
+            (
+                assigned_count,
+                ambiguous_count,
+                assigned_oids,
+                oid_field
+            ) = resolve_blank_huc12s(
+                cleaned_basins,
+                huc12,
+                main_geoms,
+                subnetworks
+            )
+
+            export_distance_assigned(
+                cleaned_basins,
+                oid_field,
+                assigned_oids,
+                os.path.join(
+                    paths["qa_folder"],
+                    f"{huc12}_DistanceAssigned.shp"
+                )
+            )
+
+            export_assignment(
+                cleaned_basins,
+                "AMBIGUOUS",
+                os.path.join(
+                    paths["qa_folder"],
+                    f"{huc12}_AmbiguousCatchments.shp"
+                )
+            )
 
             removed_output = os.path.join(
-                qa_folder,
-                f"{HUnum}_RemovedCatchments.shp"
+                paths["qa_folder"],
+                f"{huc12}_RemovedCatchments.shp"
             )
 
-            arcpy.CopyFeatures_management(
-                basin_layer,
+            export_removed_catchments(
+                cleaned_basins,
+                huc12,
                 removed_output
             )
 
-        # ----------------------------------------------------------
-        # DELETE REMOVED CATCHMENTS
-        # ----------------------------------------------------------
+            original_count = int(
+                arcpy.management.GetCount(
+                    cleaned_basins
+                )[0]
+            )
 
-        print(
-            f"    Removing "
-            f"{removed_count} "
-            f"subnetwork catchments..."
-        )
+            removed_count = (
+                remove_subnetwork_catchments(
+                    cleaned_basins,
+                    huc12
+                )
+            )
 
-        with arcpy.da.UpdateCursor(
-            cleaned_basins,
-            ["HUC12", "Assignment"]
-        ) as update_cursor:
+            remaining_count = int(
+                arcpy.management.GetCount(
+                    cleaned_basins
+                )[0]
+            )
 
-            for update_row in update_cursor:
+            delete_if_exists(
+                temp_streams
+            )
 
-                huc_value = str(
-                    update_row[0]
-                ).strip()
+            summary_rows.append(
+                [
+                    huc12,
+                    original_count,
+                    removed_count,
+                    remaining_count,
+                    assigned_count,
+                    ambiguous_count
+                ]
+            )
 
-                assignment = str(
-                    update_row[1]
-                ).strip()
-
-                if (
-                    huc_value != HUnum
-                    and
-                    assignment != "AMBIGUOUS"
-                ):
-                    update_cursor.deleteRow()
-
-        remaining_count = int(
-            arcpy.management.GetCount(
-                cleaned_basins
-            )[0]
-        )
-
-        delete_dataset(
-            temp_streams
-        )
-
-        delete_dataset(
-            basin_layer
-        )
-
-        summary_rows.append([
-            HUnum,
-            original_count,
-            removed_count,
-            remaining_count,
-            assigned_count
-        ])
-
-        print(
-            f"    Cleanup completed "
-            f"for {HUnum}"
-        )
-
-# ------------------------------------------------------------------
-# WRITE SUMMARY
-# ------------------------------------------------------------------
-
-with open(
-    summary_csv,
-    "w",
-    newline=""
-) as csvfile:
-
-    writer = csv.writer(csvfile)
-
-    writer.writerow([
-        "HUC12",
-        "Original_Count",
-        "Removed_Count",
-        "Remaining_Count",
-        "Blank_Assigned"
-    ])
-
-    writer.writerows(
-        summary_rows
+    summary_csv = os.path.join(
+        paths["qa_folder"],
+        "Cleanup_Summary.csv"
     )
 
-# ------------------------------------------------------------------
-# WRITE MISSING FILE REPORT
-# ------------------------------------------------------------------
+    with open(
+            summary_csv,
+            "w",
+            newline=""
+    ) as csvfile:
 
-with open(
-    missing_csv,
-    "w",
-    newline=""
-) as csvfile:
+        writer = csv.writer(
+            csvfile
+        )
 
-    writer = csv.writer(csvfile)
+        writer.writerow(
+            [
+                "HUC12",
+                "Original_Count",
+                "Removed_Count",
+                "Remaining_Count",
+                "Distance_Assigned",
+                "Ambiguous_Count"
+            ]
+        )
 
-    writer.writerow([
-        "HUC12",
-        "Missing_File"
-    ])
+        writer.writerows(
+            summary_rows
+        )
 
-    writer.writerows(
-        missing_rows
+    missing_csv = os.path.join(
+        paths["qa_folder"],
+        "Missing_Files.csv"
     )
 
-# ------------------------------------------------------------------
-# FINISH
-# ------------------------------------------------------------------
+    with open(
+            missing_csv,
+            "w",
+            newline=""
+    ) as csvfile:
 
-overall_end = timeit.default_timer()
+        writer = csv.writer(
+            csvfile
+        )
 
-total_minutes = (
-    overall_end - overall_start
-) / 60
+        writer.writerow(
+            [
+                "HUC12"
+            ]
+        )
 
-print(
-    f"Catchment Cleanup completed in "
-    f"{total_minutes:.2f} minutes"
-)
+        writer.writerows(
+            missing_rows
+        )
+
+    elapsed = (
+        timeit.default_timer()
+        - start_time
+    ) / 60
+
+    utils.separator()
+
+    utils.msg(
+        f"Catchment Cleanup "
+        f"completed in "
+        f"{elapsed:.2f} minutes."
+    )
+
+    utils.separator()
+
+
+if __name__ == "__main__":
+    main()
