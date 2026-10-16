@@ -19,6 +19,7 @@ import arcpy
 import catchment_utils as utils
 import json
 import urllib.parse
+import time
 
 # =============================================================================
 # WORKSPACE SETUP
@@ -126,78 +127,6 @@ def import_iwub(
         iwub_output
     )
 
-
-# =============================================================================
-# CREATE OUTSIDE LINES
-# =============================================================================
-
-def create_headwater_points(
-        outside_flowlines,
-        scratch_gdb):
-    """
-    Create headwater points from a flowline network.
-
-    Headwater points are defined as:
-
-        Start Points
-            MINUS
-        End Points
-    """
-
-    start_pts = os.path.join(
-        scratch_gdb,
-        "Start_Points"
-    )
-
-    end_pts = os.path.join(
-        scratch_gdb,
-        "End_Points"
-    )
-
-    headwater_pts = os.path.join(
-        scratch_gdb,
-        "Headwater_Points"
-    )
-
-    utils.delete_if_exists(
-        start_pts
-    )
-
-    utils.delete_if_exists(
-        end_pts
-    )
-
-    utils.delete_if_exists(
-        headwater_pts
-    )
-
-    arcpy.management.FeatureVerticesToPoints(
-        outside_flowlines,
-        start_pts,
-        "START"
-    )
-
-    arcpy.management.FeatureVerticesToPoints(
-        outside_flowlines,
-        end_pts,
-        "END"
-    )
-
-    arcpy.analysis.Erase(
-        start_pts,
-        end_pts,
-        headwater_pts
-    )
-
-    utils.delete_if_exists(
-        start_pts
-    )
-
-    utils.delete_if_exists(
-        end_pts
-    )
-
-    return headwater_pts
 
 def create_lone_end_points(
         outside_flowlines,
@@ -408,9 +337,27 @@ def prepare_outside_lines(
         outside_flowlines_sp
     )
 
-    headwater_points = create_headwater_points(
+    if "TRACE_ID" not in [
+        f.name
+        for f in arcpy.ListFields(
+            outside_flowlines_sp
+        )
+    ]:
+        arcpy.management.AddField(
+            outside_flowlines_sp,
+            "TRACE_ID",
+            "LONG"
+        )
+
+    oid_field = arcpy.Describe(
+        outside_flowlines_sp
+    ).OIDFieldName
+
+    arcpy.management.CalculateField(
         outside_flowlines_sp,
-        scratch_gdb
+        "TRACE_ID",
+        f"!{oid_field}!",
+        "PYTHON3"
     )
 
     lone_end_points = create_lone_end_points(
@@ -420,8 +367,8 @@ def prepare_outside_lines(
 
     return (
         outside_flowlines_sp,
-        headwater_points,
-        lone_end_points
+        lone_end_points,
+        iwub_ring
     )
 
 
@@ -431,10 +378,10 @@ def prepare_outside_lines(
 
 def analyze_reference_lines(
         outside_flowlines,
-        headwater_points,
         lone_end_points,
-        iwub,
-        scratch_gdb):
+        iwub_fc,
+        scratch_gdb
+):
     """
     Uses a trace network to identify valid
     exterior reference flowlines.
@@ -447,11 +394,6 @@ def analyze_reference_lines(
     merged_reference_flowlines = os.path.join(
         scratch_gdb,
         "Merged_Reference_Flowlines"
-    )
-
-    outside_reference_flowlines = os.path.join(
-        scratch_gdb,
-        "Outside_Reference_Flowlines"
     )
 
     scratch_folder = os.path.dirname(
@@ -496,9 +438,19 @@ def analyze_reference_lines(
         trace_flowlines
     )
 
+    utils.repair_geometry(
+        outside_flowlines,
+        "Outside Flowlines"
+    )
+
     arcpy.management.CopyFeatures(
         outside_flowlines,
         trace_flowlines
+    )
+
+    utils.repair_geometry(
+        trace_flowlines,
+        "Trace Flowlines"
     )
 
     # -------------------------------------------------------------------------
@@ -525,10 +477,6 @@ def analyze_reference_lines(
     # Select bad lone end points
     # -------------------------------------------------------------------------
 
-    utils.msg(
-        "Tracing upstream from invalid boundary outlets..."
-    )
-
     lone_end_lyr = "lep_lyr"
 
     arcpy.management.MakeFeatureLayer(
@@ -546,271 +494,68 @@ def analyze_reference_lines(
     )
 
     arcpy.management.PolygonToLine(
-        iwub,
+        iwub_fc,
         iwub_boundary
     )
 
     arcpy.management.SelectLayerByLocation(
-        in_layer=lone_end_lyr,
-        overlap_type="INTERSECT",
-        select_features=iwub_boundary,
-        selection_type="NEW_SELECTION"
+        lone_end_lyr,
+        "INTERSECT",
+        iwub_boundary,
+        None,
+        "NEW_SELECTION",
+        "NOT_INVERT"
     )
 
-    lone_end_points_bad = os.path.join(
+    arcpy.management.SelectLayerByAttribute(
+        lone_end_lyr,
+        "SWITCH_SELECTION"
+    )
+
+    selected_count = int(
+        arcpy.management.GetCount(
+            lone_end_lyr
+        )[0]
+    )
+
+    lone_end_points_trace = os.path.join(
         scratch_gdb,
-        "Lone_End_Points_Bad"
+        "Lone_End_Points_Trace"
     )
 
     utils.delete_if_exists(
-        lone_end_points_bad
+        lone_end_points_trace
     )
+
+    if selected_count == 0:
+        utils.warn(
+            "No Lone End Points available for tracing."
+        )
+
+        return None
 
     arcpy.management.CopyFeatures(
         lone_end_lyr,
-        lone_end_points_bad
+        lone_end_points_trace
     )
 
     # -------------------------------------------------------------------------
     # Upstream Trace
     # -------------------------------------------------------------------------
 
-    upstream_json = os.path.join(
-        scratch_folder,
-        "upstream_trace.json"
-    )
-
-    if os.path.exists(upstream_json):
-        os.remove(upstream_json)
-
-    arcpy.tn.Trace(
-        in_trace_network=trace_network,
-        trace_type="UPSTREAM",
-        starting_points=lone_end_points_bad,
-        result_types="ELEMENTS",
-        out_json_file=upstream_json
-    )
-
-    with open(
-            upstream_json,
-            "r",
-            encoding="utf-8"
-    ) as f:
-
-        upstream_data = json.load(f)
-
-    upstream_ids = {
-        element["objectId"]
-        for element in upstream_data.get(
-            "elements",
-            []
-        )
-    }
-
-    # -------------------------------------------------------------------------
-    # Select valid headwaters
-    # -------------------------------------------------------------------------
-
-    utils.msg(
-        "Tracing downstream from valid headwaters..."
-    )
-
-    headwater_lyr = "hw_lyr"
-
-    arcpy.management.MakeFeatureLayer(
-        headwater_points,
-        headwater_lyr
-    )
-
-    arcpy.management.SelectLayerByLocation(
-        in_layer=headwater_lyr,
-        overlap_type="INTERSECT",
-        select_features=iwub_boundary,
-        selection_type="NEW_SELECTION",
-        invert_spatial_relationship="INVERT"
-    )
-
-    headwater_points_to_trace = os.path.join(
+    outside_burn_lines_mp = os.path.join(
         scratch_gdb,
-        "Headwater_Points_To_Trace"
+        "Outside_Burn_Lines_MP"
     )
 
-    utils.delete_if_exists(
-        headwater_points_to_trace
-    )
-
-    arcpy.management.CopyFeatures(
-        headwater_lyr,
-        headwater_points_to_trace
-    )
-
-    downstream_json = os.path.join(
-        scratch_folder,
-        "downstream_trace.json"
-    )
-
-    if os.path.exists(downstream_json):
-        os.remove(downstream_json)
-
-    arcpy.tn.Trace(
-        in_trace_network=trace_network,
-        trace_type="DOWNSTREAM",
-        starting_points=headwater_points_to_trace,
-        result_types="ELEMENTS",
-        out_json_file=downstream_json
-    )
-
-    with open(
-            downstream_json,
-            "r",
-            encoding="utf-8"
-    ) as f:
-
-        downstream_data = json.load(f)
-
-    downstream_ids = {
-        element["objectId"]
-        for element in downstream_data.get(
-            "elements",
-            []
-        )
-    }
-
-    for json_file in [
-        upstream_json,
-        downstream_json
-    ]:
-        if os.path.exists(json_file):
-            os.remove(json_file)
-
-
-    # -------------------------------------------------------------------------
-    # Remove Bad Lines
-    # -------------------------------------------------------------------------
-
-    utils.msg(
-        "Removing invalid traced flowlines..."
-    )
-
-    valid_flowlines = os.path.join(
+    outside_burn_lines_sp = os.path.join(
         scratch_gdb,
-        "Outside_Reference_Flowlines_Valid"
+        "Outside_Burn_Lines_SP"
     )
 
-    utils.delete_if_exists(
-        valid_flowlines
-    )
-
-    valid_ids = (
-            downstream_ids -
-            upstream_ids
-    )
-
-    valid_flowlines_lyr = (
-        "valid_flowlines_lyr"
-    )
-
-    arcpy.management.MakeFeatureLayer(
-        outside_flowlines,
-        valid_flowlines_lyr
-    )
-
-    oid_field = arcpy.Describe(
-        outside_flowlines
-    ).OIDFieldName
-
-    if not valid_ids:
-        utils.msg(
-            "No valid exterior flowlines found."
-        )
-
-        return None
-
-    sql = (
-        f"{oid_field} IN "
-        f"({','.join(map(str, valid_ids))})"
-    )
-
-    arcpy.management.SelectLayerByAttribute(
-        valid_flowlines_lyr,
-        "NEW_SELECTION",
-        sql
-    )
-
-    utils.delete_if_exists(
-        valid_flowlines
-    )
-
-    arcpy.management.CopyFeatures(
-        valid_flowlines_lyr,
-        valid_flowlines
-    )
-
-    utils.msg(
-        "Removing flowlines with headwaters on work unit boundary..."
-    )
-
-    valid_start_points = os.path.join(
+    outside_burn_lines_diss = os.path.join(
         scratch_gdb,
-        "Valid_Flowline_Start_Points"
-    )
-
-    utils.delete_if_exists(
-        valid_start_points
-    )
-
-    arcpy.management.FeatureVerticesToPoints(
-        valid_flowlines,
-        valid_start_points,
-        "START"
-    )
-
-    valid_start_lyr = "valid_start_lyr"
-
-    arcpy.management.MakeFeatureLayer(
-        valid_start_points,
-        valid_start_lyr
-    )
-
-    arcpy.management.SelectLayerByLocation(
-        valid_start_lyr,
-        "INTERSECT",
-        iwub_boundary
-    )
-
-    bad_start_points = os.path.join(
-        scratch_gdb,
-        "Bad_Start_Points"
-    )
-
-    utils.delete_if_exists(
-        bad_start_points
-    )
-
-    arcpy.management.CopyFeatures(
-        valid_start_lyr,
-        bad_start_points
-    )
-
-    valid_flowlines_lyr = "valid_flowlines_lyr"
-
-    arcpy.management.MakeFeatureLayer(
-        valid_flowlines,
-        valid_flowlines_lyr
-    )
-
-    arcpy.management.SelectLayerByLocation(
-        valid_flowlines_lyr,
-        "INTERSECT",
-        bad_start_points
-    )
-
-    arcpy.management.DeleteFeatures(
-        valid_flowlines_lyr
-    )
-
-    utils.msg(
-        "Creating dissolved burn lines..."
+        "Outside_Burn_Lines_diss"
     )
 
     outside_burn_lines = os.path.join(
@@ -818,54 +563,109 @@ def analyze_reference_lines(
         "Outside_Burn_Lines"
     )
 
-    utils.delete_if_exists(
+    for fc in [
+        outside_burn_lines_mp,
+        outside_burn_lines_sp,
         outside_burn_lines
+    ]:
+        utils.delete_if_exists(fc)
+
+    arcpy.tn.Trace(
+        in_trace_network=trace_network,
+        trace_type="UPSTREAM",
+        starting_points=lone_end_points_trace,
+        result_types="AGGREGATED_GEOMETRY",
+        aggregated_lines=outside_burn_lines_mp
     )
 
+    # -------------------------------------------------------------------------
+    # Multipart To Singlepart
+    # -------------------------------------------------------------------------
+
+    arcpy.management.MultipartToSinglepart(
+        outside_burn_lines_mp,
+        outside_burn_lines_sp
+    )
+
+    # -------------------------------------------------------------------------
+    # Final Dissolve
+    # -------------------------------------------------------------------------
+
     arcpy.management.Dissolve(
-        valid_flowlines,
-        outside_burn_lines,
+        outside_burn_lines_sp,
+        outside_burn_lines_diss,
         multi_part="SINGLE_PART"
     )
 
-    utils.msg(
-        "Cleaning up intermediate datasets..."
-    )
+    return outside_burn_lines_diss
 
-    merged_reference_flowlines = os.path.join(
-        scratch_gdb,
-        "Merged_Reference_Flowlines"
-    )
-
-    cleanup_items = [
-        trace_fd,
-        trace_flowlines,
-        bad_start_points,
-        headwater_points,
-        headwater_points_to_trace,
-        lone_end_points,
-        lone_end_points_bad,
-        merged_reference_flowlines,
-        outside_reference_flowlines,
-        outside_flowlines,
-        valid_flowlines,
-        valid_start_points,
-        iwub_boundary
-    ]
-
-    for item in cleanup_items:
-        utils.delete_if_exists(
-            item
-        )
-
-    utils.msg(
-        "Reference line tracing completed."
-    )
-
-    return outside_burn_lines
 
 # =============================================================================
-# WBD EXPORTS
+# REST RETRY
+# =============================================================================
+
+def load_featureset_with_retry(
+        url,
+        max_attempts=5,
+        wait_seconds=10):
+    """
+    Load a FeatureSet from a REST endpoint.
+
+    Retries failed requests before
+    ultimately returning None.
+    """
+
+    for attempt in range(
+            1,
+            max_attempts + 1
+    ):
+
+        try:
+
+            utils.msg(
+                f"Connecting to service "
+                f"(attempt {attempt}/{max_attempts})..."
+            )
+
+            fs = arcpy.FeatureSet()
+
+            fs.load(
+                url
+            )
+
+            utils.msg(
+                "FeatureSet loaded successfully."
+            )
+
+            return fs
+
+        except Exception as ex:
+
+            utils.warn(
+                f"Attempt {attempt} failed: "
+                f"{str(ex)}"
+            )
+
+            if attempt < max_attempts:
+
+                utils.warn(
+                    f"Retrying in "
+                    f"{wait_seconds} seconds..."
+                )
+
+                time.sleep(
+                    wait_seconds
+                )
+
+    utils.warn(
+        f"Unable to retrieve data after "
+        f"{max_attempts} attempts."
+    )
+
+    return None
+
+# =============================================================================
+# WBD EXPORT
 # =============================================================================
 
 def export_wbd_layer(
@@ -874,11 +674,12 @@ def export_wbd_layer(
         output_fc,
         scratch_gdb):
     """
-    Query WBD service using iwub geometry,
-    then apply local HAVE_THEIR_CENTER_IN filtering.
+    Query WBD service using IWUB geometry,
+    then apply local HAVE_THEIR_CENTER_IN
+    filtering.
 
     This reproduces ArcGIS Pro's
-    'Have Their Center In' behavior while
+    HAVE_THEIR_CENTER_IN behavior while
     minimizing data downloaded from USGS.
     """
 
@@ -908,19 +709,35 @@ def export_wbd_layer(
     )
 
     # -------------------------------------------------------------
-    # Build extent-based REST query
+    # Build extent query
     # -------------------------------------------------------------
 
-    desc = arcpy.Describe(iwub_fc)
+    desc = arcpy.Describe(
+        iwub_fc
+    )
 
-    wgs84 = arcpy.SpatialReference(4326)
+    wgs84 = arcpy.SpatialReference(
+        4326
+    )
 
     extent_poly = arcpy.Polygon(
         arcpy.Array([
-            arcpy.Point(desc.extent.XMin, desc.extent.YMin),
-            arcpy.Point(desc.extent.XMin, desc.extent.YMax),
-            arcpy.Point(desc.extent.XMax, desc.extent.YMax),
-            arcpy.Point(desc.extent.XMax, desc.extent.YMin)
+            arcpy.Point(
+                desc.extent.XMin,
+                desc.extent.YMin
+            ),
+            arcpy.Point(
+                desc.extent.XMin,
+                desc.extent.YMax
+            ),
+            arcpy.Point(
+                desc.extent.XMax,
+                desc.extent.YMax
+            ),
+            arcpy.Point(
+                desc.extent.XMax,
+                desc.extent.YMin
+            )
         ]),
         desc.spatialReference
     )
@@ -944,9 +761,11 @@ def export_wbd_layer(
                 }
             }
         ),
-        "geometryType": "esriGeometryEnvelope",
+        "geometryType":
+            "esriGeometryEnvelope",
         "inSR": 4326,
-        "spatialRel": "esriSpatialRelIntersects",
+        "spatialRel":
+            "esriSpatialRelIntersects",
         "returnGeometry": "true",
         "outFields": "*",
         "f": "json"
@@ -957,31 +776,38 @@ def export_wbd_layer(
         f"{urllib.parse.urlencode(params)}"
     )
 
-    # -------------------------------------------------------------
-    # Load query results
-    # -------------------------------------------------------------
-
-    fs = arcpy.FeatureSet()
-
-    arcpy.AddMessage(query_url)
-
-    utils.msg("Creating FeatureSet...")
-
-    fs.load(
+    arcpy.AddMessage(
         query_url
     )
 
-    utils.msg("FeatureSet loaded.")
+    # -------------------------------------------------------------
+    # Load FeatureSet
+    # -------------------------------------------------------------
+
+    fs = load_featureset_with_retry(
+        query_url
+    )
+
+    if fs is None:
+
+        utils.warn(
+            f"Unable to retrieve "
+            f"{output_name}. Skipping."
+        )
+
+        return
 
     arcpy.management.CopyFeatures(
         fs,
         query_fc
     )
 
-    utils.msg("CopyFeatures complete.")
+    utils.msg(
+        "CopyFeatures complete."
+    )
 
     # -------------------------------------------------------------
-    # Apply centroid filtering locally
+    # Apply centroid filtering
     # -------------------------------------------------------------
 
     arcpy.management.MakeFeatureLayer(
@@ -1018,8 +844,8 @@ def export_wbd_lines(
         output_fc,
         scratch_gdb):
     """
-    Export WBDLine features corresponding to the
-    exported Existing_WBDHU12 polygons.
+    Export WBDLine features corresponding to
+    the exported Existing_WBDHU12 polygons.
     """
 
     wbdhu12_lines = os.path.join(
@@ -1032,24 +858,54 @@ def export_wbd_lines(
         "qry_WBDLines"
     )
 
-    layer_name = "wbd_lines_lyr"
+    layer_name = (
+        "wbd_lines_lyr"
+    )
+
+    utils.delete_if_exists(
+        wbdhu12_lines
+    )
+
+    utils.delete_if_exists(
+        query_fc
+    )
+
+    utils.delete_if_exists(
+        output_fc
+    )
 
     arcpy.management.PolygonToLine(
         existing_wbdhu12,
         wbdhu12_lines
     )
 
-    desc = arcpy.Describe(
-        existing_wbdhu12
+    query_url = (
+        "https://hydro.nationalmap.gov/"
+        "arcgis/rest/services/"
+        "wbd/MapServer/0"
     )
 
-    query_url = r"https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/0"
+    utils.msg(
+        "Retrieving Existing_WBDLines..."
+    )
 
-    fs = arcpy.FeatureSet()
-
-    fs.load(
+    fs = load_featureset_with_retry(
         query_url
     )
+
+    if fs is None:
+
+        utils.warn(
+            "Unable to retrieve "
+            "Existing_WBDLines. "
+            "Skipping."
+        )
+
+        utils.delete_if_exists(
+            wbdhu12_lines
+        )
+
+        return
 
     arcpy.management.CopyFeatures(
         fs,
@@ -1077,7 +933,10 @@ def export_wbd_lines(
         wbdhu12_lines,
         query_fc
     ]:
-        utils.delete_if_exists(item)
+
+        utils.delete_if_exists(
+            item
+        )
 
     arcpy.management.Delete(
         layer_name
@@ -1088,7 +947,7 @@ def export_wbd_lines(
 # =============================================================================
 
 def export_outside_burn_features(
-        outside_burn_lines,
+        outside_burn_lines_diss,
         existing_wbdhu12,
         user_workspace,
         scratch_gdb):
@@ -1122,12 +981,21 @@ def export_outside_burn_features(
     # -----------------------------------------------------------------
 
     arcpy.analysis.SpatialJoin(
-        target_features=outside_burn_lines,
+        target_features=outside_burn_lines_diss,
         join_features=existing_wbdhu12,
         out_feature_class=outside_burn_lines_sj,
         join_operation="JOIN_ONE_TO_ONE",
         join_type="KEEP_ALL",
         match_option="CLOSEST"
+    )
+
+    # -----------------------------------------------------------------
+    # Delete Big Integer TARGET_FID field
+    # -----------------------------------------------------------------
+
+    arcpy.management.DeleteField(
+        outside_burn_lines_sj,
+        ["TARGET_FID"]
     )
 
     # -----------------------------------------------------------------
@@ -1152,6 +1020,169 @@ def export_outside_burn_features(
         "Outside burn features exported."
     )
 
+
+# =============================================================================
+# HU12 DEMS
+# =============================================================================
+
+def create_hu12_dem_rasters(
+        locale,
+        existing_wbdhu12,
+        user_workspace,
+        scratch_gdb,
+        work_unit_dem=None,
+        hu12_dem_folder=None):
+    """
+    Populate the A_DEMs folder.
+
+    AK:
+        Extract By Mask from supplied Work Unit DEM.
+
+    CONUS:
+        Copy existing HU12 DEM rasters from a
+        supplied folder.
+    """
+
+    utils.msg(
+        "Creating HU12 DEM Rasters..."
+    )
+
+    dem_folder = os.path.join(
+        user_workspace,
+        "02_HRT_Processing",
+        "A_DEMs"
+    )
+
+    # ---------------------------------------------------------------------
+    # Alaska
+    # ---------------------------------------------------------------------
+
+    if locale.upper() == "AK":
+
+        from arcpy.sa import ExtractByMask
+
+        buffer_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Buffer"
+        )
+
+        utils.delete_if_exists(
+            buffer_fc
+        )
+
+        oid_field = arcpy.Describe(
+            existing_wbdhu12
+        ).OIDFieldName
+
+        with arcpy.da.SearchCursor(
+                existing_wbdhu12,
+                [oid_field, "HUC12"]
+        ) as rows:
+
+            for oid, huc12 in rows:
+                huc12_name = str(huc12).strip()
+
+                where_clause = (
+                    f"{oid_field} = {oid}"
+                )
+
+                hu12_fc = os.path.join(
+                    scratch_gdb,
+                    "HU12_Single"
+                )
+
+                utils.delete_if_exists(
+                    hu12_fc
+                )
+
+                arcpy.analysis.Select(
+                    existing_wbdhu12,
+                    hu12_fc,
+                    where_clause
+                )
+
+                utils.delete_if_exists(
+                    buffer_fc
+                )
+
+                arcpy.analysis.Buffer(
+                    hu12_fc,
+                    buffer_fc,
+                    "1005 Meters",
+                    dissolve_option="ALL"
+                )
+
+                out_tif = os.path.join(
+                    dem_folder,
+                    f"{huc12_name}.tif"
+                )
+
+                result = ExtractByMask(
+                    work_unit_dem,
+                    buffer_fc
+                )
+
+                result.save(
+                    out_tif
+                )
+
+                utils.delete_if_exists(
+                    hu12_fc
+                )
+
+        utils.delete_if_exists(
+            buffer_fc
+        )
+
+    # ---------------------------------------------------------------------
+    # CONUS
+    # ---------------------------------------------------------------------
+
+    elif locale.upper() == "CONUS":
+
+        huc12_values = set()
+
+        with arcpy.da.SearchCursor(
+                existing_wbdhu12,
+                ["HUC12"]
+        ) as rows:
+
+            for (huc12,) in rows:
+
+                huc12_values.add(
+                    str(huc12)
+                )
+
+        for file_name in os.listdir(
+                hu12_dem_folder
+        ):
+
+            if not file_name.lower().endswith(
+                    ".tif"
+            ):
+                continue
+
+            stem = os.path.splitext(
+                file_name
+            )[0]
+
+            if stem in huc12_values:
+
+                shutil.copy2(
+                    os.path.join(
+                        hu12_dem_folder,
+                        file_name
+                    ),
+                    os.path.join(
+                        dem_folder,
+                        file_name
+                    )
+                )
+
+    utils.msg(
+        "HU12 DEM raster creation complete."
+    )
+
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -1169,6 +1200,8 @@ def main():
     iwub_shape = arcpy.GetParameterAsText(2)
     locale = arcpy.GetParameterAsText(3)
     reference_flowlines = arcpy.GetParameterAsText(4)
+    work_unit_dem = arcpy.GetParameterAsText(5)
+    hu12_dem_folder = arcpy.GetParameterAsText(6)
 
     # -------------------------------------------------------------------------
     # SPATIAL REFERENCE
@@ -1187,6 +1220,11 @@ def main():
     # -------------------------------------------------------------------------
     # STARTUP
     # -------------------------------------------------------------------------
+    if locale.upper() == "AK":
+        arcpy.CheckOutExtension(
+            "Spatial"
+        )
+
 
     utils.separator()
 
@@ -1279,7 +1317,7 @@ def main():
     # CREATE OUTSIDE LINES
     # -------------------------------------------------------------------------
 
-    outside_reference_flowlines, headwater_points, lone_end_points = (
+    outside_reference_flowlines, lone_end_points, iwub_ring = (
         prepare_outside_lines(
             iwub_fc=iwub_fc,
             reference_flowlines=reference_flowlines,
@@ -1287,18 +1325,11 @@ def main():
         )
     )
 
-    utils.msg(
-        "Analyzing exterior flowline network..."
-    )
-
-    outside_burn_lines = (
-        analyze_reference_lines(
-            outside_flowlines=outside_reference_flowlines,
-            headwater_points=headwater_points,
-            lone_end_points=lone_end_points,
-            iwub=iwub_fc,
-            scratch_gdb=scratch_gdb
-        )
+    outside_burn_lines = analyze_reference_lines(
+        outside_flowlines=outside_reference_flowlines,
+        lone_end_points=lone_end_points,
+        iwub_fc=iwub_fc,
+        scratch_gdb=scratch_gdb
     )
 
     # -------------------------------------------------------------------------
@@ -1350,10 +1381,40 @@ def main():
     # -------------------------------------------------------------------------
 
     export_outside_burn_features(
-        outside_burn_lines=outside_burn_lines,
+        outside_burn_lines_diss=outside_burn_lines,
         existing_wbdhu12=huc12_fc,
         user_workspace=user_workspace,
         scratch_gdb=scratch_gdb
+    )
+
+    # -------------------------------------------------------------------------
+    # CREATE HU12 DEMs FOR HRT
+    # -------------------------------------------------------------------------
+
+    create_hu12_dem_rasters(
+        locale=locale,
+        existing_wbdhu12=huc12_fc,
+        user_workspace=user_workspace,
+        scratch_gdb=scratch_gdb,
+        work_unit_dem=work_unit_dem,
+        hu12_dem_folder=hu12_dem_folder
+    )
+
+    # -------------------------------------------------------------------------
+    # CLEANUP SCRATCH DATA
+    # -------------------------------------------------------------------------
+
+    utils.cleanup([
+        os.path.join(scratch_gdb, "RefLines_Trace"),
+        os.path.join(scratch_gdb, "iwub_Boundary"),
+        os.path.join(scratch_gdb, "iwub_Buffer_1000m"),
+        os.path.join(scratch_gdb, "iwub_Ring_1000m"),
+        os.path.join(scratch_gdb, "Lone_End_Points"),
+        os.path.join(scratch_gdb, "Outside_Burn_Lines_diss"),
+        os.path.join(scratch_gdb, "Outside_Burn_Lines_MP"),
+        os.path.join(scratch_gdb, "Outside_Burn_Lines_SP"),
+        os.path.join(scratch_gdb, "Outside_Reference_Lines"),
+        os.path.join(scratch_gdb, "Outside_Reference_Lines_SP")]
     )
 
     # -------------------------------------------------------------------------
@@ -1367,6 +1428,11 @@ def main():
     )
 
     utils.separator()
+
+    if locale.upper() == "AK":
+        arcpy.CheckInExtension(
+            "Spatial"
+        )
 
 
 if __name__ == "__main__":

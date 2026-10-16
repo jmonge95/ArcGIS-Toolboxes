@@ -341,6 +341,14 @@ def get_cleanup_temp_folder(
         "C_Temp"
     )
 
+def cleanup(items):
+
+    for item in items:
+
+        delete_if_exists(
+            item
+        )
+
 def get_merged_flowlines_fc(
         user_workspace):
 
@@ -350,3 +358,78 @@ def get_merged_flowlines_fc(
         ),
         "MERGED_Flowlines_by_HU12"
     )
+
+# =============================================================================
+# REPAIR GEOMETRY
+# =============================================================================
+
+def repair_geometry(
+        input_fc,
+        label=None):
+    """
+    Perform both ESRI and OGC geometry validation.
+
+    Runs:
+        1. Repair Geometry (ESRI)
+        2. Repair Geometry (OGC)
+
+    Delete Null Geometry is enabled for both passes.
+
+    Parameters
+    ----------
+    input_fc : str
+        Input feature class.
+
+    label : str, optional
+        Friendly name for messaging.
+    """
+
+    if label is None:
+        label = os.path.basename(input_fc)
+
+    if not arcpy.Exists(input_fc):
+
+        warn(
+            f"Geometry repair skipped. "
+            f"{label} does not exist."
+        )
+
+        return
+
+    try:
+
+        before_count = int(
+            arcpy.management.GetCount(
+                input_fc
+            )[0]
+        )
+
+        arcpy.management.RepairGeometry(
+            in_features=input_fc,
+            delete_null="DELETE_NULL",
+            validation_method="ESRI"
+        )
+
+        arcpy.management.RepairGeometry(
+            in_features=input_fc,
+            delete_null="DELETE_NULL",
+            validation_method="OGC"
+        )
+
+        after_count = int(
+            arcpy.management.GetCount(
+                input_fc
+            )[0]
+        )
+
+        removed_count = (
+            before_count -
+            after_count
+        )
+
+    except Exception as ex:
+
+        warn(
+            f"Geometry repair failed for "
+            f"{label}: {str(ex)}"
+        )
