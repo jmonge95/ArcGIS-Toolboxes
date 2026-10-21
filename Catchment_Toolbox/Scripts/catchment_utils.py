@@ -30,9 +30,10 @@ WBD_Line_URL = (
     "https://hydro.nationalmap.gov/arcgis/rest/services/wbd/MapServer/0"
 )
 
-TEMPLATE_DIRECTORY = (
-    r"C:\Users\Jimmy.Monge\Documents\!Script_Copies\!_Toolbox_Workspaces"
-    r"\z_Pro_Workspaces\Catchments_WBD\Workflow_Directory_TEMPLATE"
+from pathlib import Path
+TEMPLATE_DIRECTORY = str(
+    Path(__file__).resolve().parent.parent
+    / "Workflow_Directory_TEMPLATE"
 )
 
 # =============================================================================
