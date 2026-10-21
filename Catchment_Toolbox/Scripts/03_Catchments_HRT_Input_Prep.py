@@ -11,6 +11,7 @@ Purpose:
 import os
 import arcpy
 import catchment_utils as utils
+import shutil
 
 arcpy.env.overwriteOutput = True
 
@@ -169,7 +170,7 @@ def export_streams(
         "flowlines_lyr",
         "WITHIN_A_DISTANCE",
         hu12_geom,
-        "250 Meters",
+        "1005 Meters",
         "ADD_TO_SELECTION"
     )
 
@@ -177,7 +178,7 @@ def export_streams(
         "flowlines_lyr",
         "WITHIN_A_DISTANCE",
         hu12_geom,
-        "500 Meters",
+        "1005 Meters",
         "SUBSET_SELECTION"
     )
 
@@ -233,6 +234,296 @@ def export_streams(
 
 
 # =============================================================================
+# HU12 DEMS
+# =============================================================================
+
+def create_hu12_dem_rasters(
+        locale,
+        flowlines_by_huc,
+        existing_wbdhu12,
+        user_workspace,
+        scratch_gdb,
+        work_unit_dem=None,
+        hu12_dem_folder=None):
+    """
+    Populate the A_DEMs folder.
+
+    AK:
+        Build a convex hull around each HUC12's
+        flowlines, buffer 1005 meters, then
+        Extract By Mask from the Work Unit DEM.
+
+    CONUS:
+        Copy matching HUC12 DEMs from a DEM folder.
+    """
+
+    utils.msg(
+        "Creating HU12 DEM Rasters..."
+    )
+
+    dem_folder = os.path.join(
+        user_workspace,
+        "02_HRT_Processing",
+        "A_DEMs"
+    )
+
+    # ---------------------------------------------------------------------
+    # AK
+    # ---------------------------------------------------------------------
+
+    if locale.upper() == "AK":
+
+        oid_field = arcpy.Describe(
+            existing_wbdhu12
+        ).OIDFieldName
+
+        for huc12, in arcpy.da.SearchCursor(
+                existing_wbdhu12,
+                ["HUC12"]
+        ):
+
+            huc12_name = str(
+                huc12
+            ).strip()
+
+            where_clause = (
+                f"HUC12 = '{huc12_name}'"
+            )
+
+            flowlines_fc = os.path.join(
+                scratch_gdb,
+                "HU12_Flowlines"
+            )
+
+            hu12_fc = os.path.join(
+                scratch_gdb,
+                "HU12_Polygon"
+            )
+
+            hull_fc = os.path.join(
+                scratch_gdb,
+                "HU12_Hull"
+            )
+
+            hull_fc_buff = os.path.join(
+                scratch_gdb,
+                "HU12_Hull_Buff"
+            )
+
+            hu12_fc_buff = os.path.join(
+                scratch_gdb,
+                "HU12_Polygon_Buff"
+            )
+
+            merged_mask_fc = os.path.join(
+                scratch_gdb,
+                "HU12_Mask_Merge"
+            )
+
+            final_mask_fc = os.path.join(
+                scratch_gdb,
+                "HU12_Mask"
+            )
+
+            for item in [
+                flowlines_fc,
+                hu12_fc,
+                hull_fc,
+                hull_fc_buff,
+                hu12_fc_buff,
+                merged_mask_fc,
+                final_mask_fc
+            ]:
+                utils.delete_if_exists(item)
+
+            arcpy.analysis.Select(
+                flowlines_by_huc,
+                flowlines_fc,
+                where_clause
+            )
+
+            arcpy.analysis.Select(
+                existing_wbdhu12,
+                hu12_fc,
+                where_clause
+            )
+
+            count = int(
+                arcpy.management.GetCount(
+                    flowlines_fc
+                ).getOutput(0)
+            )
+
+            if count == 0:
+                continue
+
+            arcpy.management.MinimumBoundingGeometry(
+                flowlines_fc,
+                hull_fc,
+                "CONVEX_HULL",
+                group_option="ALL"
+            )
+
+            arcpy.analysis.Buffer(
+                hull_fc,
+                hull_fc_buff,
+                "1005 Meters",
+                dissolve_option="ALL"
+            )
+
+            arcpy.analysis.Buffer(
+                hu12_fc,
+                hu12_fc_buff,
+                "1005 Meters",
+                dissolve_option="ALL"
+            )
+
+            arcpy.management.Merge(
+                [
+                    hull_fc_buff,
+                    hu12_fc_buff
+                ],
+                merged_mask_fc
+            )
+
+            arcpy.management.Dissolve(
+                merged_mask_fc,
+                final_mask_fc
+            )
+
+            out_tif = os.path.join(
+                dem_folder,
+                f"{huc12_name}.tif"
+            )
+
+            from arcpy.sa import ExtractByMask
+
+            with arcpy.EnvManager(
+                    scratchWorkspace=dem_folder):
+
+                out_raster = ExtractByMask(
+                    in_raster=work_unit_dem,
+                    in_mask_data=final_mask_fc,
+                    extraction_area="INSIDE"
+                )
+
+                out_raster.save(
+                    out_tif
+                )
+
+        flowlines_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Flowlines"
+        )
+
+        hull_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Hull"
+        )
+
+        buffer_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Buffer"
+        )
+
+        flowlines_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Flowlines"
+        )
+
+        hu12_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Polygon"
+        )
+
+        hull_fc_buff = os.path.join(
+            scratch_gdb,
+            "HU12_Hull_Buff"
+        )
+
+        hu12_fc_buff = os.path.join(
+            scratch_gdb,
+            "HU12_Polygon_Buff"
+        )
+
+        merged_mask_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Mask_Merge"
+        )
+
+        final_mask_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Mask"
+        )
+
+        for huc12, in arcpy.da.SearchCursor(
+                existing_wbdhu12,
+                ["HUC12"]
+        ):
+
+            for item in [
+                flowlines_fc,
+                hu12_fc,
+                hull_fc,
+                hull_fc_buff,
+                merged_mask_fc,
+                final_mask_fc
+            ]:
+                utils.delete_if_exists(
+                    item
+                )
+
+    # ---------------------------------------------------------------------
+    # CONUS
+    # ---------------------------------------------------------------------
+
+    elif locale.upper() == "CONUS":
+
+        huc12_values = set()
+
+        with arcpy.da.SearchCursor(
+                existing_wbdhu12,
+                ["HUC12"]
+        ) as rows:
+
+            for (huc12,) in rows:
+
+                huc12_values.add(
+                    str(huc12).strip()
+                )
+
+        for file_name in os.listdir(
+                hu12_dem_folder
+        ):
+
+            if not file_name.lower().endswith(
+                    ".tif"
+            ):
+                continue
+
+            stem = os.path.splitext(
+                file_name
+            )[0]
+
+            if stem in huc12_values:
+
+                shutil.copy2(
+                    os.path.join(
+                        hu12_dem_folder,
+                        file_name
+                    ),
+                    os.path.join(
+                        dem_folder,
+                        file_name
+                    )
+                )
+
+    utils.msg(
+        "HU12 DEM raster creation complete."
+    )
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -241,6 +532,12 @@ def main():
     user_workspace = (
         arcpy.GetParameterAsText(0)
     )
+    locale = arcpy.GetParameterAsText(1)
+    work_unit_dem = arcpy.Describe(
+        arcpy.GetParameterAsText(2)
+    ).catalogPath
+    hu12_dem_folder = arcpy.GetParameterAsText(3)
+
 
     polygons_fc = (
         utils.get_edh_polygons(
@@ -264,6 +561,10 @@ def main():
         utils.get_flowlines_by_huc_gdb(
             user_workspace
         )
+    )
+
+    scratch_gdb = utils.get_scratch_gdb(
+        user_workspace
     )
 
     merged_flowlines_fc = os.path.join(
@@ -330,6 +631,16 @@ def main():
                 huc12,
                 streams_folder
             )
+
+    create_hu12_dem_rasters(
+        locale=locale,
+        flowlines_by_huc=merged_flowlines_fc,
+        existing_wbdhu12=huc12_fc,
+        user_workspace=user_workspace,
+        scratch_gdb=scratch_gdb,
+        work_unit_dem=work_unit_dem,
+        hu12_dem_folder=hu12_dem_folder
+    )
 
     utils.separator()
 

@@ -344,7 +344,7 @@ def validate_identical_lines(
     identical_count = int(
         arcpy.management.GetCount(
             identical_table
-        )[0]
+        ).getOutput(0)
     )
 
     if identical_count > 0:
@@ -361,6 +361,7 @@ def validate_identical_lines(
         ) as cursor:
 
             for row in cursor:
+
                 oids.append(
                     str(row[0])
                 )
@@ -388,6 +389,14 @@ def validate_identical_lines(
         )
 
     else:
+
+        utils.delete_if_exists(
+            identical_table
+        )
+
+        utils.delete_if_exists(
+            duplicate_fc
+        )
 
         utils.msg(
             "No identical flowlines found."
@@ -424,7 +433,7 @@ def validate_trace_coverage(
     untraced_count = int(
         arcpy.management.GetCount(
             untraced_fc
-        )[0]
+        ).getOutput(0)
     )
 
     if untraced_count > 0:
@@ -441,6 +450,10 @@ def validate_trace_coverage(
         )
 
     else:
+
+        utils.delete_if_exists(
+            untraced_fc
+        )
 
         utils.msg(
             "All source flowlines were attributed."

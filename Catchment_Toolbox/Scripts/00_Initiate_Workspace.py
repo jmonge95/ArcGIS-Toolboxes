@@ -919,7 +919,7 @@ def export_wbd_lines(
 
     arcpy.management.SelectLayerByLocation(
         in_layer=layer_name,
-        overlap_type="SHARE_A_LINE_SEGMENT_WITH",
+        overlap_type="INTERSECT",
         select_features=wbdhu12_lines,
         selection_type="NEW_SELECTION"
     )
@@ -1020,169 +1020,6 @@ def export_outside_burn_features(
         "Outside burn features exported."
     )
 
-
-# =============================================================================
-# HU12 DEMS
-# =============================================================================
-
-def create_hu12_dem_rasters(
-        locale,
-        existing_wbdhu12,
-        user_workspace,
-        scratch_gdb,
-        work_unit_dem=None,
-        hu12_dem_folder=None):
-    """
-    Populate the A_DEMs folder.
-
-    AK:
-        Extract By Mask from supplied Work Unit DEM.
-
-    CONUS:
-        Copy existing HU12 DEM rasters from a
-        supplied folder.
-    """
-
-    utils.msg(
-        "Creating HU12 DEM Rasters..."
-    )
-
-    dem_folder = os.path.join(
-        user_workspace,
-        "02_HRT_Processing",
-        "A_DEMs"
-    )
-
-    # ---------------------------------------------------------------------
-    # Alaska
-    # ---------------------------------------------------------------------
-
-    if locale.upper() == "AK":
-
-        from arcpy.sa import ExtractByMask
-
-        buffer_fc = os.path.join(
-            scratch_gdb,
-            "HU12_Buffer"
-        )
-
-        utils.delete_if_exists(
-            buffer_fc
-        )
-
-        oid_field = arcpy.Describe(
-            existing_wbdhu12
-        ).OIDFieldName
-
-        with arcpy.da.SearchCursor(
-                existing_wbdhu12,
-                [oid_field, "HUC12"]
-        ) as rows:
-
-            for oid, huc12 in rows:
-                huc12_name = str(huc12).strip()
-
-                where_clause = (
-                    f"{oid_field} = {oid}"
-                )
-
-                hu12_fc = os.path.join(
-                    scratch_gdb,
-                    "HU12_Single"
-                )
-
-                utils.delete_if_exists(
-                    hu12_fc
-                )
-
-                arcpy.analysis.Select(
-                    existing_wbdhu12,
-                    hu12_fc,
-                    where_clause
-                )
-
-                utils.delete_if_exists(
-                    buffer_fc
-                )
-
-                arcpy.analysis.Buffer(
-                    hu12_fc,
-                    buffer_fc,
-                    "1005 Meters",
-                    dissolve_option="ALL"
-                )
-
-                out_tif = os.path.join(
-                    dem_folder,
-                    f"{huc12_name}.tif"
-                )
-
-                result = ExtractByMask(
-                    work_unit_dem,
-                    buffer_fc
-                )
-
-                result.save(
-                    out_tif
-                )
-
-                utils.delete_if_exists(
-                    hu12_fc
-                )
-
-        utils.delete_if_exists(
-            buffer_fc
-        )
-
-    # ---------------------------------------------------------------------
-    # CONUS
-    # ---------------------------------------------------------------------
-
-    elif locale.upper() == "CONUS":
-
-        huc12_values = set()
-
-        with arcpy.da.SearchCursor(
-                existing_wbdhu12,
-                ["HUC12"]
-        ) as rows:
-
-            for (huc12,) in rows:
-
-                huc12_values.add(
-                    str(huc12)
-                )
-
-        for file_name in os.listdir(
-                hu12_dem_folder
-        ):
-
-            if not file_name.lower().endswith(
-                    ".tif"
-            ):
-                continue
-
-            stem = os.path.splitext(
-                file_name
-            )[0]
-
-            if stem in huc12_values:
-
-                shutil.copy2(
-                    os.path.join(
-                        hu12_dem_folder,
-                        file_name
-                    ),
-                    os.path.join(
-                        dem_folder,
-                        file_name
-                    )
-                )
-
-    utils.msg(
-        "HU12 DEM raster creation complete."
-    )
-
 # =============================================================================
 # MAIN
 # =============================================================================
@@ -1200,8 +1037,6 @@ def main():
     iwub_shape = arcpy.GetParameterAsText(2)
     locale = arcpy.GetParameterAsText(3)
     reference_flowlines = arcpy.GetParameterAsText(4)
-    work_unit_dem = arcpy.GetParameterAsText(5)
-    hu12_dem_folder = arcpy.GetParameterAsText(6)
 
     # -------------------------------------------------------------------------
     # SPATIAL REFERENCE
@@ -1385,19 +1220,6 @@ def main():
         existing_wbdhu12=huc12_fc,
         user_workspace=user_workspace,
         scratch_gdb=scratch_gdb
-    )
-
-    # -------------------------------------------------------------------------
-    # CREATE HU12 DEMs FOR HRT
-    # -------------------------------------------------------------------------
-
-    create_hu12_dem_rasters(
-        locale=locale,
-        existing_wbdhu12=huc12_fc,
-        user_workspace=user_workspace,
-        scratch_gdb=scratch_gdb,
-        work_unit_dem=work_unit_dem,
-        hu12_dem_folder=hu12_dem_folder
     )
 
     # -------------------------------------------------------------------------
