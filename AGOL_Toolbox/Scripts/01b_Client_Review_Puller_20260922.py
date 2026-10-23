@@ -90,6 +90,34 @@ def clear_service(service_url):
             service_url
         )
 
+def append_feedback_data(
+        source_fc,
+        target_fc):
+
+    if not arcpy.Exists(
+            source_fc):
+        return
+
+    count = int(
+        arcpy.management.GetCount(
+            source_fc
+        ).getOutput(0)
+    )
+
+    if count == 0:
+        return
+
+    arcpy.management.Append(
+        source_fc,
+        target_fc,
+        "NO_TEST"
+    )
+
+    arcpy.AddMessage(
+        f"Appended {count:,} "
+        f"feedback features."
+    )
+
 
 # =============================================================================
 # EXPORT REVIEW LAYERS
@@ -117,7 +145,9 @@ def export_review_layer(
 
 def append_review_data(
         source_fc,
-        target_fc):
+        target_fc,
+        work_unit_boundary,
+        where_clause=None):
 
     source_count = get_count(
         source_fc
@@ -132,14 +162,71 @@ def append_review_data(
 
         return
 
-    arcpy.management.Append(
+    layer_name = (
+        f"lyr_{os.path.basename(source_fc)}"
+    )
+
+    arcpy.management.MakeFeatureLayer(
         source_fc,
+        layer_name
+    )
+
+    if where_clause:
+
+        arcpy.management.SelectLayerByAttribute(
+            layer_name,
+            "NEW_SELECTION",
+            where_clause
+        )
+
+        arcpy.management.SelectLayerByLocation(
+            layer_name,
+            "INTERSECT",
+            work_unit_boundary,
+            None,
+            "SUBSET_SELECTION"
+        )
+
+    else:
+
+        arcpy.management.SelectLayerByLocation(
+            layer_name,
+            "INTERSECT",
+            work_unit_boundary
+        )
+
+    arcpy.management.SelectLayerByLocation(
+        layer_name,
+        "INTERSECT",
+        work_unit_boundary
+    )
+
+    selected_count = int(
+        arcpy.management.GetCount(
+            layer_name
+        ).getOutput(0)
+    )
+
+    if selected_count == 0:
+
+        arcpy.AddWarning(
+            f"No features intersect the "
+            f"Work Unit Boundary in "
+            f"{os.path.basename(source_fc)}."
+        )
+
+        return
+
+    arcpy.management.Append(
+        layer_name,
         target_fc,
         "NO_TEST"
     )
 
     arcpy.AddMessage(
-        f"Appended {source_count:,} features."
+        f"Appended {selected_count:,} "
+        f"features from "
+        f"{os.path.basename(source_fc)}."
     )
 
 
@@ -161,8 +248,16 @@ def main():
         arcpy.GetParameterAsText(2)
     )
 
+    work_unit_boundary = (
+        arcpy.GetParameterAsText(3)
+    )
+
+    washd_initial_feedback_gdb = (
+        arcpy.GetParameterAsText(4)
+    )
+
     clear_agol = (
-        arcpy.GetParameter(3)
+        arcpy.GetParameter(5)
     )
 
     verify_portal()
@@ -170,6 +265,18 @@ def main():
     project_config = (
         get_project(project)
     )
+
+    where_clause = None
+
+    if project_config.get(
+            "apply_washd_filter",
+            False
+    ):
+        where_clause = (
+            project_config[
+                "washd_where_clause"
+            ]
+        )
 
     review_services = (
         get_review_services(project)
@@ -274,6 +381,25 @@ def main():
         production_gdb_path
     )
 
+    for fc in [
+
+        project_config["target_review_points"],
+        project_config["target_review_lines"],
+        project_config["target_review_polygons"]
+
+    ]:
+
+        fc_path = os.path.join(
+            production_gdb_path,
+            fc
+        )
+
+        if not arcpy.Exists(fc_path):
+            raise RuntimeError(
+                f"Expected feature class not found:\n"
+                f"{fc_path}"
+            )
+
     # =====================================================================
     # APPEND REVIEW DATA
     # =====================================================================
@@ -295,33 +421,78 @@ def main():
 
     target_points = os.path.join(
         production_gdb_path,
-        "Client_Review_Point_NV5"
+        project_config["target_review_points"]
     )
 
     target_lines = os.path.join(
         production_gdb_path,
-        "Client_Review_Line_NV5"
+        project_config["target_review_lines"]
     )
 
     target_polygons = os.path.join(
         production_gdb_path,
-        "Client_Review_Polygon_NV5"
+        project_config["target_review_polygons"]
     )
 
     append_review_data(
         source_points,
-        target_points
+        target_points,
+        work_unit_boundary,
+        where_clause
     )
 
     append_review_data(
         source_lines,
-        target_lines
+        target_lines,
+        work_unit_boundary,
+        where_clause
     )
 
     append_review_data(
         source_polygons,
-        target_polygons
+        target_polygons,
+        work_unit_boundary,
+        where_clause
     )
+
+    if (
+            project == "Washington"
+            and
+            washd_initial_feedback_gdb
+    ):
+        arcpy.AddMessage(
+            "Appending WASHD Initial Feedback..."
+        )
+
+        append_feedback_data(
+
+            os.path.join(
+                washd_initial_feedback_gdb,
+                "Review_Points"
+            ),
+
+            target_points
+        )
+
+        append_feedback_data(
+
+            os.path.join(
+                washd_initial_feedback_gdb,
+                "Review_Lines"
+            ),
+
+            target_lines
+        )
+
+        append_feedback_data(
+
+            os.path.join(
+                washd_initial_feedback_gdb,
+                "Review_Polygons"
+            ),
+
+            target_polygons
+        )
 
     # =====================================================================
     # OPTIONAL AGOL CLEANUP

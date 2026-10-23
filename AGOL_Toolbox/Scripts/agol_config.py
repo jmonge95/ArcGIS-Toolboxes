@@ -55,11 +55,31 @@ PROJECTS = {
         "review_polygons":
             "https://services2.arcgis.com/AcNHAIhTDPOJkhQF/ArcGIS/rest/services/Client_Review_Layers_MiHydro/FeatureServer/1",
 
+        # -------------------------------------------------------------
+        # Puller Configuration
+        # -------------------------------------------------------------
+
         "template_gdb":
             r"W:\2023_MI_Statewide_EDH\14_Edits\z_MI_ClientReview_TEMPLATE\TEMPLATE_ClientReviewLayers_NV5.gdb",
 
         "download_name":
-            "Client_Review_Layers_MiHydro"
+            "Client_Review_Layers_MiHydro",
+
+        "target_review_points":
+            "Client_Review_Point_NV5",
+
+        "target_review_lines":
+            "Client_Review_Line_NV5",
+
+        "target_review_polygons":
+            "Client_Review_Polygon_NV5",
+
+        # -------------------------------------------------------------
+        # Project-Specific Processing
+        # -------------------------------------------------------------
+
+        "apply_washd_filter":
+            False
     },
 
     # =====================================================================
@@ -97,11 +117,34 @@ PROJECTS = {
         "review_polygons":
             "https://services2.arcgis.com/AcNHAIhTDPOJkhQF/ArcGIS/rest/services/WASHD_FY24_Review_Layers/FeatureServer/1",
 
+        # -------------------------------------------------------------
+        # Puller Configuration
+        # -------------------------------------------------------------
+
         "template_gdb":
             r"W:\2025_WA_EasternWA_FY26_EDH\17_Edits\z_TEMPLATE\00_AGOL_Prep\02_WASHD_Markups\HUC8_Review_Layers.gdb",
 
         "download_name":
-            "Client_Review_Layers_WaHydro"
+            "Client_Review_Layers_WaHydro",
+
+        "target_review_points":
+            "Review_Points",
+
+        "target_review_lines":
+            "Review_Lines",
+
+        "target_review_polygons":
+            "Review_Polygons",
+
+        # -------------------------------------------------------------
+        # Washington-Specific Processing
+        # -------------------------------------------------------------
+
+        "apply_washd_filter":
+            True,
+
+        "washd_where_clause":
+            "WASHD_Proceed NOT IN ('Unreviewed', 'No')"
     }
 }
 
