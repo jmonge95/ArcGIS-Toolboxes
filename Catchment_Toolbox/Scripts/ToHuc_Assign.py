@@ -40,56 +40,50 @@ def build_graph(fc, huc_field):
 
 
 def get_start_nodes(graph, starts, streams, spatial_ref, snap_tolerance):
-    """ Starts within snap_tolerance of a line use that line's start node. If the start is within tolerance of
-     the line's end node and that node begins another line, the end node is used instead, so starts on
-     confluences are not assigned to the upstream tributary that also touches them. Start coordinates are read
-     in the streams spatial reference so they match the graph nodes. Starts not on a stream are returned as
-     untraced QC rows instead of being traced """
+    """ Starts are HUC12 pour points, so each should sit on the end node or edge of the last line in its HUC12.
+     Lines ending at the start are preferred over the downstream line that begins there, the trace begins from
+     that line's end node, and the line's HUC12 is the starting HUC12. Start coordinates are read in the streams
+     spatial reference so they match the graph nodes. Starts not on a stream are returned as untraced QC rows
+     instead of being traced """
 
-    # Find the line each start is on, NEAR_DIST is in the starts units so starts should share the streams units
-    near_table = arcpy.GenerateNearTable_analysis(starts, streams, "memory/start_near", closest="CLOSEST")
-    start_lines = {}
+    # Find all lines within snap tolerance of each start, since the line ending at a pour point and the line
+    # beginning there are both at distance 0. NEAR_DIST is in the starts units so starts should share the
+    # streams units
+    near_table = arcpy.GenerateNearTable_analysis(
+        starts, streams, "memory/start_near", search_radius=str(snap_tolerance), closest="ALL", closest_count=0
+    )
+    start_lines = defaultdict(list)
     with arcpy.da.SearchCursor(near_table, ["IN_FID", "NEAR_FID", "NEAR_DIST"]) as cursor:
         for in_fid, near_fid, near_dist in cursor:
             if near_dist <= snap_tolerance:
-                start_lines[in_fid] = near_fid
+                start_lines[in_fid].append((near_dist, near_fid))
     arcpy.Delete_management(near_table)
 
-    line_nodes = {edge_attrs["oid"]: (start, end) for start, end, edge_attrs in graph.edges(data=True)}
+    line_info = {edge_attrs["oid"]: (end, edge_attrs["huc"]) for _, end, edge_attrs in graph.edges(data=True)}
     start_nodes = []
     unsnapped = []
 
     with arcpy.da.SearchCursor(starts, ["OID@", "SHAPE@X", "SHAPE@Y"], spatial_reference=spatial_ref) as cursor:
         for oid, x, y in cursor:
             point = node_key(x, y)
-            if oid not in start_lines:
+            candidates = [(dist, fid) for dist, fid in start_lines.get(oid, []) if fid in line_info]
+            if not candidates:
                 arcpy.AddWarning(f"Start OID {oid} is not snapped to a stream.")
                 unsnapped.append((point, None, None, "Start not snapped to stream"))
                 continue
-            if start_lines[oid] not in line_nodes:
-                # Left as the point location so it is caught as untraced
-                start_nodes.append((oid, point))
-                continue
 
-            start, end = line_nodes[start_lines[oid]]
-            at_end = math.hypot(x - end[0], y - end[1]) <= snap_tolerance
-            if at_end and graph.out_degree(end) > 0:
-                start_nodes.append((oid, end))
-            else:
-                start_nodes.append((oid, start))
+            # Lines ending at the start, otherwise the closest line the start sits on the edge of
+            ending = [
+                fid for _, fid in candidates
+                if math.hypot(x - line_info[fid][0][0], y - line_info[fid][0][1]) <= snap_tolerance
+            ]
+            lines = ending if ending else [min(candidates)[1]]
+
+            end = line_info[lines[0]][0]
+            hucs = {line_info[fid][1] for fid in lines if line_info[fid][1] is not None}
+            start_nodes.append((oid, end, hucs))
 
     return start_nodes, unsnapped
-
-
-def get_start_hucs(graph, start):
-    """ HUC12 of the line(s) leaving the start node """
-
-    hucs = set()
-    for edges in graph[start].values():
-        for edge_attrs in edges.values():
-            if edge_attrs["huc"] is not None:
-                hucs.add(edge_attrs["huc"])
-    return hucs
 
 
 def trace(graph, start, start_huc):
@@ -127,21 +121,16 @@ def trace(graph, start, start_huc):
 def export_qc_points(name, rows, spatial_ref):
     """ Write QC points with the start and downstream HUC12 and the reason for review """
 
-    if not rows:
-        if arcpy.Exists(name):
-            arcpy.Delete_management(name)
-        return False
+    qc_points = arcpy.CreateFeatureclass_management(arcpy.env.workspace, name, "POINT", spatial_reference=spatial_ref)
+    arcpy.AddField_management(qc_points, "Start_HUC", "TEXT", field_length=100)
+    arcpy.AddField_management(qc_points, "Down_HUC", "TEXT", field_length=100)
+    arcpy.AddField_management(qc_points, "Issue", "TEXT", field_length=100)
 
-    arcpy.CreateFeatureclass_management(arcpy.env.workspace, name, "POINT", spatial_reference=spatial_ref)
-    arcpy.AddField_management(name, "Start_HUC", "TEXT", field_length=100)
-    arcpy.AddField_management(name, "Down_HUC", "TEXT", field_length=100)
-    arcpy.AddField_management(name, "Issue", "TEXT", field_length=100)
-
-    with arcpy.da.InsertCursor(name, ["SHAPE@", "Start_HUC", "Down_HUC", "Issue"]) as insert_cursor:
+    with arcpy.da.InsertCursor(qc_points, ["SHAPE@", "Start_HUC", "Down_HUC", "Issue"]) as insert_cursor:
         for (x, y), start_huc, down_huc, issue in rows:
             insert_cursor.insertRow([arcpy.Point(x, y), start_huc, down_huc, issue])
 
-    return True
+    return qc_points
 
 
 def output_qc(untraced, conflicts, spatial_ref):
@@ -149,17 +138,25 @@ def output_qc(untraced, conflicts, spatial_ref):
 
     errors_found = False
 
-    if export_qc_points("QC_Untraced_Points", untraced, spatial_ref):
-        arcpy.AddMessage("Untraced start points exported as QC_Untraced_Points")
+    untraced_pts = export_qc_points("QC_Untraced_Points", untraced, spatial_ref)
+    count = int(arcpy.management.GetCount(untraced_pts)[0])
+
+    if count:
+        arcpy.AddWarning(f"{count} untraced start points found, check QC_Untraced_Points!")
         errors_found = True
     else:
         arcpy.AddMessage("No untraced starts found.")
+        arcpy.management.Delete(untraced_pts)
 
-    if export_qc_points("QC_Conflict_Points", conflicts, spatial_ref):
-        arcpy.AddMessage("Conflicting start points exported as QC_Conflict_Points, these HUC12s are not updated.")
+    conflict_pts = export_qc_points("QC_Conflict_Points", conflicts, spatial_ref)
+    count = int(arcpy.management.GetCount(conflict_pts)[0])
+
+    if count:
+        arcpy.AddWarning(f"{count} conflicting start points found, check QC_Conflict_Points! These HUC12s are not updated.")
         errors_found = True
     else:
         arcpy.AddMessage("No conflicting starts found.")
+        arcpy.management.Delete(conflict_pts)
 
     return errors_found
 
@@ -210,20 +207,19 @@ def main(starts_fc, streams, huc_polys, qc_gdb, stream_huc_field, poly_huc_field
     results = defaultdict(list)
     conflicts = []
     conflict_hucs = set()
-    for i, (oid, start) in enumerate(start_nodes, start=1):
-        arcpy.AddMessage(f"Tracing start {i}/{total_starts}: OID {oid}")
-
-        if start not in graph:
-            arcpy.AddWarning(f"Start OID {oid} not found as a stream node.")
-            untraced.append((start, None, None, "Start not on stream node"))
-            continue
-
-        start_hucs = get_start_hucs(graph, start)
+    for i, (oid, start, start_hucs) in enumerate(start_nodes, start=1):
         if len(start_hucs) != 1:
-            arcpy.AddWarning(f"Start OID {oid} has {len(start_hucs)} HUC12 values on its starting line(s).")
+            arcpy.AddWarning(f"Start OID {oid} has {len(start_hucs)} HUC12 values on its pour point line(s).")
             untraced.append((start, ", ".join(sorted(start_hucs)) or None, None, "Starting HUC12 missing or ambiguous"))
             continue
         start_huc = next(iter(start_hucs))
+        arcpy.AddMessage(f"Tracing start {i}/{total_starts}: HUC12 {start_huc} (OID {oid})")
+
+        # Nothing flows out of the pour point line
+        if graph.out_degree(start) == 0:
+            arcpy.AddWarning(f"Start OID {oid} ({start_huc}) ends at a sink, possible closed basin.")
+            untraced.append((start, start_huc, None, "Possible closed basin"))
+            continue
 
         found = trace(graph, start, start_huc)
         if not found:
@@ -236,7 +232,9 @@ def main(starts_fc, streams, huc_polys, qc_gdb, stream_huc_field, poly_huc_field
             conflict_hucs.add(start_huc)
             continue
 
-        results[start_huc].append((next(iter(found)), start))
+        down_huc = next(iter(found))
+        arcpy.AddMessage(f"  {start_huc} -> {down_huc}")
+        results[start_huc].append((down_huc, start))
     arcpy.AddMessage("Tracing of starts downstream complete.")
 
     # Resolve one downstream HUC12 per starting HUC12, multiple starts in the same HUC12 must agree
