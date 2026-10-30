@@ -15,6 +15,41 @@ import shutil
 
 arcpy.env.overwriteOutput = True
 
+arcpy.env.parallelProcessingFactor = "100%"
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+def delete_if_empty(fc):
+    """
+    Delete a feature class if it exists
+    and contains zero features.
+
+    Returns:
+        True  = dataset deleted
+        False = dataset retained
+    """
+
+    if not arcpy.Exists(fc):
+        return False
+
+    count = int(
+        arcpy.management.GetCount(
+            fc
+        ).getOutput(0)
+    )
+
+    if count == 0:
+
+        arcpy.management.Delete(
+            fc
+        )
+
+        return True
+
+    return False
 
 # =============================================================================
 # WATERBODIES
@@ -22,6 +57,8 @@ arcpy.env.overwriteOutput = True
 
 def export_waterbodies(
         polygons_fc,
+        lake_master,
+        river_master,
         hu12_geom,
         huc12,
         output_folder,
@@ -36,27 +73,18 @@ def export_waterbodies(
         Clip to a 1005-meter HU12 buffer.
     """
 
-    utils.msg(
-        f"Creating waterbodies for {huc12}..."
-    )
+    # utils.msg(
+    #     f"Creating waterbodies for {huc12}..."
+    # )
 
     output_fc = os.path.join(
         output_folder,
         f"{huc12}.shp"
     )
 
-    utils.delete_if_exists(
-        output_fc
-    )
-
     lake_fc = os.path.join(
         scratch_gdb,
         f"lake_fc_{huc12}"
-    )
-
-    river_fc = os.path.join(
-        scratch_gdb,
-        f"river_fc_{huc12}"
     )
 
     river_clip = os.path.join(
@@ -69,160 +97,171 @@ def export_waterbodies(
         f"hu12_buffer_{huc12}"
     )
 
-    # -------------------------------------------------------------------------
-    # Cleanup leftovers from prior runs
-    # -------------------------------------------------------------------------
-
-    for item in [
+    scratch_items = [
         lake_fc,
-        river_fc,
         river_clip,
         hu12_buffer
-    ]:
-        utils.delete_if_exists(
-            item
-        )
-
-    # -------------------------------------------------------------------------
-    # Lakes / Ponds (FCode = 39000)
-    # -------------------------------------------------------------------------
-
-    arcpy.management.MakeFeatureLayer(
-        polygons_fc,
-        "lake_lyr",
-        "FCode = 39000"
-    )
-
-    arcpy.management.SelectLayerByLocation(
-        "lake_lyr",
-        "HAVE_THEIR_CENTER_IN",
-        hu12_geom
-    )
-
-    arcpy.management.CopyFeatures(
-        "lake_lyr",
-        lake_fc
-    )
-
-    # -------------------------------------------------------------------------
-    # Stream / River Waterbodies (FCode = 46000)
-    # -------------------------------------------------------------------------
-
-    arcpy.management.MakeFeatureLayer(
-        polygons_fc,
-        "river_lyr",
-        "FCode = 46000"
-    )
-
-    arcpy.management.CopyFeatures(
-        "river_lyr",
-        river_fc
-    )
-
-    arcpy.analysis.Buffer(
-        hu12_geom,
-        hu12_buffer,
-        "1005 Meters",
-        dissolve_option="ALL"
-    )
-
-    arcpy.analysis.Clip(
-        river_fc,
-        hu12_buffer,
-        river_clip
-    )
-
-    # -------------------------------------------------------------------------
-    # Combine Outputs
-    # -------------------------------------------------------------------------
-
-    inputs = []
-
-    if int(
-            arcpy.management.GetCount(
-                lake_fc
-            ).getOutput(0)
-    ) > 0:
-
-        inputs.append(
-            lake_fc
-        )
-
-    if int(
-            arcpy.management.GetCount(
-                river_clip
-            ).getOutput(0)
-    ) > 0:
-
-        inputs.append(
-            river_clip
-        )
-
-    if inputs:
-
-        arcpy.management.Merge(
-            inputs,
-            output_fc
-        )
-
-    else:
-
-        arcpy.management.CreateFeatureclass(
-            output_folder,
-            f"{huc12}.shp",
-            "POLYGON",
-            polygons_fc
-        )
-
-    # -------------------------------------------------------------------------
-    # Normalize legacy FCode values
-    # -------------------------------------------------------------------------
-
-    field_names = [
-        f.name
-        for f in arcpy.ListFields(
-            output_fc
-        )
     ]
 
-    if "FCode" in field_names:
+    try:
 
-        with arcpy.da.UpdateCursor(
-                output_fc,
-                ["FCode"]
-        ) as cursor:
-
-            for row in cursor:
-
-                if row[0] == 43600:
-
-                    row[0] = 39000
-
-                    cursor.updateRow(
-                        row
-                    )
-
-    # -------------------------------------------------------------------------
-    # Cleanup
-    # -------------------------------------------------------------------------
-
-    arcpy.management.Delete(
-        "lake_lyr"
-    )
-
-    arcpy.management.Delete(
-        "river_lyr"
-    )
-
-    for item in [
-        lake_fc,
-        river_fc,
-        river_clip,
-        hu12_buffer
-    ]:
         utils.delete_if_exists(
-            item
+            output_fc
         )
+
+        for item in scratch_items:
+            utils.delete_if_exists(item)
+
+        # -----------------------------------------------------
+        # Lakes / Ponds (FCode = 39000)
+        # -----------------------------------------------------
+
+        arcpy.management.SelectLayerByLocation(
+            lake_master,
+            "HAVE_THEIR_CENTER_IN",
+            hu12_geom,
+            selection_type="NEW_SELECTION"
+        )
+
+        lake_count = int(
+            arcpy.management.GetCount(
+                lake_master
+            ).getOutput(0)
+        )
+
+        if lake_count > 0:
+
+            arcpy.management.CopyFeatures(
+                lake_master,
+                lake_fc
+            )
+
+        # -----------------------------------------------------
+        # River / Stream Polygons (FCode = 46000)
+        # -----------------------------------------------------
+
+        arcpy.analysis.Buffer(
+            hu12_geom,
+            hu12_buffer,
+            "1005 Meters",
+            dissolve_option="ALL"
+        )
+
+        arcpy.management.SelectLayerByLocation(
+            river_master,
+            "INTERSECT",
+            hu12_buffer,
+            selection_type="NEW_SELECTION"
+        )
+
+        river_count = int(
+            arcpy.management.GetCount(
+                river_master
+            ).getOutput(0)
+        )
+
+        if river_count > 0:
+
+            arcpy.analysis.Clip(
+                river_master,
+                hu12_buffer,
+                river_clip
+            )
+
+        # -----------------------------------------------------
+        # Build output
+        # -----------------------------------------------------
+
+        inputs = []
+
+        if arcpy.Exists(lake_fc):
+
+            if int(
+                    arcpy.management.GetCount(
+                        lake_fc
+                    ).getOutput(0)
+            ) > 0:
+
+                inputs.append(
+                    lake_fc
+                )
+
+        if arcpy.Exists(river_clip):
+
+            if int(
+                    arcpy.management.GetCount(
+                        river_clip
+                    ).getOutput(0)
+            ) > 0:
+
+                inputs.append(
+                    river_clip
+                )
+
+        if len(inputs) > 0:
+
+            arcpy.management.Merge(
+                inputs,
+                output_fc
+            )
+
+        else:
+
+            arcpy.management.CreateFeatureclass(
+                output_folder,
+                f"{huc12}.shp",
+                "POLYGON",
+                polygons_fc
+            )
+
+        # -----------------------------------------------------
+        # Delete empty outputs
+        # -----------------------------------------------------
+
+        if delete_if_empty(
+                output_fc
+        ):
+
+            # utils.msg(
+            #     f"Deleted empty waterbody "
+            #     f"file for {huc12}"
+            # )
+
+            return
+
+        # -----------------------------------------------------
+        # Normalize FCode
+        # -----------------------------------------------------
+
+        if "FCode" in [
+            f.name
+            for f in arcpy.ListFields(
+                output_fc
+            )
+        ]:
+
+            with arcpy.da.UpdateCursor(
+                    output_fc,
+                    ["FCode"]
+            ) as cursor:
+
+                for row in cursor:
+
+                    if row[0] == 43600:
+
+                        row[0] = 39000
+
+                        cursor.updateRow(
+                            row
+                        )
+
+    finally:
+
+        for item in scratch_items:
+
+            utils.delete_if_exists(
+                item
+            )
 
 
 # =============================================================================
@@ -241,9 +280,9 @@ def export_streams(
     connected subnetworks.
     """
 
-    utils.msg(
-        f"Creating streams for {huc12}..."
-    )
+    # utils.msg(
+    #     f"Creating streams for {huc12}..."
+    # )
 
     output_fc = os.path.join(
         output_folder,
@@ -357,20 +396,43 @@ def export_streams(
         output_fc
     )
 
+    arcpy.management.Merge(
+        [
+            temp_subnetwork,
+            hu_network_fc
+        ],
+        output_fc
+    )
+
+    # ---------------------------------------------------------
+    # Delete empty output
+    # ---------------------------------------------------------
+
+    if delete_if_empty(output_fc):
+        utils.msg(
+            f"Deleted empty stream file for {huc12}"
+        )
+
+        arcpy.management.Delete(
+            temp_subnetwork
+        )
+
+        arcpy.management.Delete(
+            "flowlines_lyr"
+        )
+
+        arcpy.management.Delete(
+            "start_pts"
+        )
+
+        arcpy.management.Delete(
+            "stop_pts"
+        )
+
+        return
+
     arcpy.management.Delete(
         temp_subnetwork
-    )
-
-    arcpy.management.Delete(
-        "flowlines_lyr"
-    )
-
-    arcpy.management.Delete(
-        "start_pts"
-    )
-
-    arcpy.management.Delete(
-        "stop_pts"
     )
 
 
@@ -392,7 +454,7 @@ def create_hu12_dem_rasters(
     AK:
         Build a convex hull around each HUC12's
         flowlines, buffer 1005 meters, then
-        Extract By Mask from the Work Unit DEM.
+        ExtractByMask from the Work Unit DEM.
 
     CONUS:
         Copy matching HUC12 DEMs from a DEM folder.
@@ -414,167 +476,21 @@ def create_hu12_dem_rasters(
 
     if locale.upper() == "AK":
 
-        oid_field = arcpy.Describe(
-            existing_wbdhu12
-        ).OIDFieldName
+        from arcpy.sa import ExtractByMask
 
-        for huc12, in arcpy.da.SearchCursor(
-                existing_wbdhu12,
-                ["HUC12"]
-        ):
-
-            huc12_name = str(
-                huc12
-            ).strip()
-
-            where_clause = (
-                f"HUC12 = '{huc12_name}'"
-            )
-
-            flowlines_fc = os.path.join(
-                scratch_gdb,
-                "HU12_Flowlines"
-            )
-
-            hu12_fc = os.path.join(
-                scratch_gdb,
-                "HU12_Polygon"
-            )
-
-            hull_fc = os.path.join(
-                scratch_gdb,
-                "HU12_Hull"
-            )
-
-            hull_fc_buff = os.path.join(
-                scratch_gdb,
-                "HU12_Hull_Buff"
-            )
-
-            hu12_fc_buff = os.path.join(
-                scratch_gdb,
-                "HU12_Polygon_Buff"
-            )
-
-            merged_mask_fc = os.path.join(
-                scratch_gdb,
-                "HU12_Mask_Merge"
-            )
-
-            final_mask_fc = os.path.join(
-                scratch_gdb,
-                "HU12_Mask"
-            )
-
-            for item in [
-                flowlines_fc,
-                hu12_fc,
-                hull_fc,
-                hull_fc_buff,
-                hu12_fc_buff,
-                merged_mask_fc,
-                final_mask_fc
-            ]:
-                utils.delete_if_exists(item)
-
-            arcpy.analysis.Select(
-                flowlines_by_huc,
-                flowlines_fc,
-                where_clause
-            )
-
-            arcpy.analysis.Select(
-                existing_wbdhu12,
-                hu12_fc,
-                where_clause
-            )
-
-            count = int(
-                arcpy.management.GetCount(
-                    flowlines_fc
-                ).getOutput(0)
-            )
-
-            if count == 0:
-                continue
-
-            arcpy.management.MinimumBoundingGeometry(
-                flowlines_fc,
-                hull_fc,
-                "CONVEX_HULL",
-                group_option="ALL"
-            )
-
-            arcpy.analysis.Buffer(
-                hull_fc,
-                hull_fc_buff,
-                "1005 Meters",
-                dissolve_option="ALL"
-            )
-
-            arcpy.analysis.Buffer(
-                hu12_fc,
-                hu12_fc_buff,
-                "1005 Meters",
-                dissolve_option="ALL"
-            )
-
-            arcpy.management.Merge(
-                [
-                    hull_fc_buff,
-                    hu12_fc_buff
-                ],
-                merged_mask_fc
-            )
-
-            arcpy.management.Dissolve(
-                merged_mask_fc,
-                final_mask_fc
-            )
-
-            out_tif = os.path.join(
-                dem_folder,
-                f"{huc12_name}.tif"
-            )
-
-            from arcpy.sa import ExtractByMask
-
-            with arcpy.EnvManager(
-                    scratchWorkspace=dem_folder):
-
-                out_raster = ExtractByMask(
-                    in_raster=work_unit_dem,
-                    in_mask_data=final_mask_fc,
-                    extraction_area="INSIDE"
-                )
-
-                out_raster.save(
-                    out_tif
-                )
-
-        flowlines_fc = os.path.join(
-            scratch_gdb,
-            "HU12_Flowlines"
-        )
-
-        hull_fc = os.path.join(
-            scratch_gdb,
-            "HU12_Hull"
-        )
-
-        buffer_fc = os.path.join(
-            scratch_gdb,
-            "HU12_Buffer"
-        )
-
-        flowlines_fc = os.path.join(
-            scratch_gdb,
-            "HU12_Flowlines"
+        arcpy.management.MakeFeatureLayer(
+            existing_wbdhu12,
+            "hu12_lyr"
         )
 
         hu12_fc = os.path.join(
             scratch_gdb,
             "HU12_Polygon"
+        )
+
+        hull_fc = os.path.join(
+            scratch_gdb,
+            "HU12_Hull"
         )
 
         hull_fc_buff = os.path.join(
@@ -599,20 +515,141 @@ def create_hu12_dem_rasters(
 
         for huc12, in arcpy.da.SearchCursor(
                 existing_wbdhu12,
-                ["HUC12"]
-        ):
+                ["HUC12"]):
 
-            for item in [
-                flowlines_fc,
-                hu12_fc,
-                hull_fc,
-                hull_fc_buff,
-                merged_mask_fc,
-                final_mask_fc
-            ]:
-                utils.delete_if_exists(
-                    item
+            huc12_name = str(
+                huc12
+            ).strip()
+
+            try:
+
+                # utils.msg(
+                #     f"Creating DEM: "
+                #     f"{huc12_name}.tif"
+                # )
+
+                flowlines_fc = os.path.join(
+                    utils.get_flowlines_by_huc_gdb(
+                        user_workspace
+                    ),
+                    f"HU_{huc12_name}"
                 )
+
+                if not arcpy.Exists(
+                        flowlines_fc):
+
+                    utils.warn(
+                        f"Missing flowlines: "
+                        f"HU_{huc12_name}"
+                    )
+
+                    continue
+
+                count = int(
+                    arcpy.management.GetCount(
+                        flowlines_fc
+                    ).getOutput(0)
+                )
+
+                if count == 0:
+
+                    utils.warn(
+                        f"Empty flowlines: "
+                        f"HU_{huc12_name}"
+                    )
+
+                    continue
+
+                where_clause = (
+                    f"HUC12 = '{huc12_name}'"
+                )
+
+                arcpy.management.SelectLayerByAttribute(
+                    "hu12_lyr",
+                    "NEW_SELECTION",
+                    where_clause
+                )
+
+                arcpy.management.CopyFeatures(
+                    "hu12_lyr",
+                    hu12_fc
+                )
+
+                arcpy.management.MinimumBoundingGeometry(
+                    flowlines_fc,
+                    hull_fc,
+                    "CONVEX_HULL",
+                    group_option="ALL"
+                )
+
+                arcpy.analysis.Buffer(
+                    hull_fc,
+                    hull_fc_buff,
+                    "1005 Meters",
+                    dissolve_option="ALL"
+                )
+
+                arcpy.analysis.Buffer(
+                    hu12_fc,
+                    hu12_fc_buff,
+                    "1005 Meters",
+                    dissolve_option="ALL"
+                )
+
+                arcpy.management.Merge(
+                    [
+                        hull_fc_buff,
+                        hu12_fc_buff
+                    ],
+                    merged_mask_fc
+                )
+
+                arcpy.management.Dissolve(
+                    merged_mask_fc,
+                    final_mask_fc
+                )
+
+                out_tif = os.path.join(
+                    dem_folder,
+                    f"{huc12_name}.tif"
+                )
+
+                out_raster = ExtractByMask(
+                    work_unit_dem,
+                    final_mask_fc
+                )
+
+                out_raster.save(
+                    out_tif
+                )
+
+            except Exception as ex:
+
+                utils.warn(
+                    f"DEM failed for "
+                    f"{huc12_name}: {ex}"
+                )
+
+            finally:
+
+                for item in [
+                    hu12_fc,
+                    hull_fc,
+                    hull_fc_buff,
+                    hu12_fc_buff,
+                    merged_mask_fc,
+                    final_mask_fc
+                ]:
+                    utils.delete_if_exists(
+                        item
+                    )
+
+        if arcpy.Exists(
+                "hu12_lyr"):
+
+            arcpy.management.Delete(
+                "hu12_lyr"
+            )
 
     # ---------------------------------------------------------------------
     # CONUS
@@ -697,6 +734,11 @@ def rebuild_hu12_networks(
         if row[0]
     })
 
+    arcpy.management.MakeFeatureLayer(
+        merged_flowlines_fc,
+        "merged_lyr"
+    )
+
     for huc12 in huc12_values:
 
         output_fc = os.path.join(
@@ -712,22 +754,33 @@ def rebuild_hu12_networks(
             output_fc
         )
 
-        arcpy.analysis.Select(
-            merged_flowlines_fc,
-            output_fc,
+        arcpy.management.SelectLayerByAttribute(
+            "merged_lyr",
+            "NEW_SELECTION",
             where_clause
         )
 
-        count = int(
-            arcpy.management.GetCount(
-                output_fc
-            ).getOutput(0)
+        arcpy.management.CopyFeatures(
+            "merged_lyr",
+            output_fc
         )
 
-        utils.msg(
-            f"Rebuilt HU_{huc12} "
-            f"({count:,} features)"
-        )
+        # arcpy.analysis.Select(
+        #     merged_flowlines_fc,
+        #     output_fc,
+        #     where_clause
+        # )
+
+        # count = int(
+        #     arcpy.management.GetCount(
+        #         output_fc
+        #     ).getOutput(0)
+        # )
+
+        # utils.msg(
+        #     f"Rebuilt HU_{huc12} "
+        #     f"({count:,} features)"
+        # )
 
     utils.msg(
         "HU12 network rebuild complete."
@@ -783,6 +836,15 @@ def main():
         "MERGED_Flowlines_by_HU12"
     )
 
+    utils.separator()
+
+    utils.msg(
+        "Catchment Toolbox - "
+        "03 Prepare HRT Inputs"
+    )
+
+    utils.separator()
+
     rebuild_hu12_networks(
         merged_flowlines_fc,
         flowlines_gdb
@@ -800,14 +862,17 @@ def main():
         )
     )
 
-    utils.separator()
-
-    utils.msg(
-        "Catchment Toolbox - "
-        "03 Prepare HRT Inputs"
+    arcpy.management.MakeFeatureLayer(
+        polygons_fc,
+        "lake_master",
+        "FCode = 39000"
     )
 
-    utils.separator()
+    arcpy.management.MakeFeatureLayer(
+        polygons_fc,
+        "river_master",
+        "FCode = 46000"
+    )
 
     with arcpy.da.SearchCursor(
             huc12_fc,
@@ -834,6 +899,8 @@ def main():
 
             export_waterbodies(
                 polygons_fc,
+                "lake_master",
+                "river_master",
                 hu12_geom,
                 huc12,
                 waterbodies_folder,
