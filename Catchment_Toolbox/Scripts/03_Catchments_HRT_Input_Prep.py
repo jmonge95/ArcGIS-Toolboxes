@@ -24,9 +24,16 @@ def export_waterbodies(
         polygons_fc,
         hu12_geom,
         huc12,
-        output_folder):
+        output_folder,
+        scratch_gdb):
     """
     Export HU12 waterbodies.
+
+    Lake/Pond (FCode 39000):
+        Select by center-in-HU12.
+
+    Stream/River (FCode 46000):
+        Clip to a 1005-meter HU12 buffer.
     """
 
     utils.msg(
@@ -42,27 +49,143 @@ def export_waterbodies(
         output_fc
     )
 
+    lake_fc = os.path.join(
+        scratch_gdb,
+        f"lake_fc_{huc12}"
+    )
+
+    river_fc = os.path.join(
+        scratch_gdb,
+        f"river_fc_{huc12}"
+    )
+
+    river_clip = os.path.join(
+        scratch_gdb,
+        f"river_clip_{huc12}"
+    )
+
+    hu12_buffer = os.path.join(
+        scratch_gdb,
+        f"hu12_buffer_{huc12}"
+    )
+
+    # -------------------------------------------------------------------------
+    # Cleanup leftovers from prior runs
+    # -------------------------------------------------------------------------
+
+    for item in [
+        lake_fc,
+        river_fc,
+        river_clip,
+        hu12_buffer
+    ]:
+        utils.delete_if_exists(
+            item
+        )
+
+    # -------------------------------------------------------------------------
+    # Lakes / Ponds (FCode = 39000)
+    # -------------------------------------------------------------------------
+
     arcpy.management.MakeFeatureLayer(
         polygons_fc,
-        "polygons_lyr"
+        "lake_lyr",
+        "FCode = 39000"
     )
 
     arcpy.management.SelectLayerByLocation(
-        "polygons_lyr",
+        "lake_lyr",
         "HAVE_THEIR_CENTER_IN",
         hu12_geom
     )
 
     arcpy.management.CopyFeatures(
-        "polygons_lyr",
-        output_fc
+        "lake_lyr",
+        lake_fc
     )
 
-    if "FCode" in [
-            f.name for f in arcpy.ListFields(
-                output_fc
-            )
-    ]:
+    # -------------------------------------------------------------------------
+    # Stream / River Waterbodies (FCode = 46000)
+    # -------------------------------------------------------------------------
+
+    arcpy.management.MakeFeatureLayer(
+        polygons_fc,
+        "river_lyr",
+        "FCode = 46000"
+    )
+
+    arcpy.management.CopyFeatures(
+        "river_lyr",
+        river_fc
+    )
+
+    arcpy.analysis.Buffer(
+        hu12_geom,
+        hu12_buffer,
+        "1005 Meters",
+        dissolve_option="ALL"
+    )
+
+    arcpy.analysis.Clip(
+        river_fc,
+        hu12_buffer,
+        river_clip
+    )
+
+    # -------------------------------------------------------------------------
+    # Combine Outputs
+    # -------------------------------------------------------------------------
+
+    inputs = []
+
+    if int(
+            arcpy.management.GetCount(
+                lake_fc
+            ).getOutput(0)
+    ) > 0:
+
+        inputs.append(
+            lake_fc
+        )
+
+    if int(
+            arcpy.management.GetCount(
+                river_clip
+            ).getOutput(0)
+    ) > 0:
+
+        inputs.append(
+            river_clip
+        )
+
+    if inputs:
+
+        arcpy.management.Merge(
+            inputs,
+            output_fc
+        )
+
+    else:
+
+        arcpy.management.CreateFeatureclass(
+            output_folder,
+            f"{huc12}.shp",
+            "POLYGON",
+            polygons_fc
+        )
+
+    # -------------------------------------------------------------------------
+    # Normalize legacy FCode values
+    # -------------------------------------------------------------------------
+
+    field_names = [
+        f.name
+        for f in arcpy.ListFields(
+            output_fc
+        )
+    ]
+
+    if "FCode" in field_names:
 
         with arcpy.da.UpdateCursor(
                 output_fc,
@@ -79,9 +202,27 @@ def export_waterbodies(
                         row
                     )
 
+    # -------------------------------------------------------------------------
+    # Cleanup
+    # -------------------------------------------------------------------------
+
     arcpy.management.Delete(
-        "polygons_lyr"
+        "lake_lyr"
     )
+
+    arcpy.management.Delete(
+        "river_lyr"
+    )
+
+    for item in [
+        lake_fc,
+        river_fc,
+        river_clip,
+        hu12_buffer
+    ]:
+        utils.delete_if_exists(
+            item
+        )
 
 
 # =============================================================================
@@ -524,6 +665,76 @@ def create_hu12_dem_rasters(
 
 
 # =============================================================================
+# REBUILD HU12 NETWORKS
+# =============================================================================
+
+def rebuild_hu12_networks(
+        merged_flowlines_fc,
+        flowlines_gdb):
+    """
+    Rebuild individual HU_{huc12} feature classes
+    from MERGED_Flowlines_by_HU12.
+
+    Allows analysts to perform QC edits on the
+    merged feature class and propagate those edits
+    throughout downstream processing.
+    """
+
+    utils.msg(
+        "Rebuilding HU12 networks from "
+        "MERGED_Flowlines_by_HU12..."
+    )
+
+    huc12_values = sorted({
+
+        str(row[0]).strip()
+
+        for row in arcpy.da.SearchCursor(
+            merged_flowlines_fc,
+            ["HUC12"]
+        )
+
+        if row[0]
+    })
+
+    for huc12 in huc12_values:
+
+        output_fc = os.path.join(
+            flowlines_gdb,
+            f"HU_{huc12}"
+        )
+
+        where_clause = (
+            f"HUC12 = '{huc12}'"
+        )
+
+        utils.delete_if_exists(
+            output_fc
+        )
+
+        arcpy.analysis.Select(
+            merged_flowlines_fc,
+            output_fc,
+            where_clause
+        )
+
+        count = int(
+            arcpy.management.GetCount(
+                output_fc
+            ).getOutput(0)
+        )
+
+        utils.msg(
+            f"Rebuilt HU_{huc12} "
+            f"({count:,} features)"
+        )
+
+    utils.msg(
+        "HU12 network rebuild complete."
+    )
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -570,6 +781,11 @@ def main():
     merged_flowlines_fc = os.path.join(
         flowlines_gdb,
         "MERGED_Flowlines_by_HU12"
+    )
+
+    rebuild_hu12_networks(
+        merged_flowlines_fc,
+        flowlines_gdb
     )
 
     streams_folder = (
@@ -620,7 +836,8 @@ def main():
                 polygons_fc,
                 hu12_geom,
                 huc12,
-                waterbodies_folder
+                waterbodies_folder,
+                scratch_gdb
             )
 
             export_streams(

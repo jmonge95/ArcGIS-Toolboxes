@@ -530,8 +530,26 @@ def main():
     # COMPLETE
     # =====================================================================
 
+    webmap_url = (
+        "https://nv5geospatial.maps.arcgis.com/"
+        "apps/mapviewer/index.html?webmap="
+        f"{project_config['webmap_id']}"
+    )
+    
     arcpy.AddMessage(
         "=" * 60
+    )
+
+    arcpy.AddWarning("")
+    arcpy.AddWarning(
+        "MANUAL WEB MAP REVIEW REQUIRED"
+    )
+    arcpy.AddWarning(
+        f"Open: {webmap_url}"
+    )
+    arcpy.AddWarning(
+        "Refer to the SOP for required "
+        "post-pull cleanup tasks."
     )
 
     arcpy.AddMessage(
