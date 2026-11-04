@@ -1,5 +1,5 @@
 """
-02_Attribute_Lines_By_HUC.py
+02_Attribute_Lines_By_HUC_graph.py
 
 Catchment Toolbox
 
@@ -7,14 +7,20 @@ Purpose:
     Traces EDH flowlines upstream from each
     QA/QC'd HU12 pour point and exports
     one flowline feature class per HU12.
+    Traces run on an in memory networkx graph
+    instead of a trace network.
 
 Parameter:
     0 - User Workspace
 """
 
+import math
 import os
 import arcpy
+import networkx as nx
 import catchment_utils as utils
+
+from collections import defaultdict, deque
 
 # =============================================================================
 # OUTPUT GDB
@@ -39,259 +45,205 @@ def create_output_gdb(user_workspace):
     return output_gdb
 
 # =============================================================================
-# TRACE NETWORK
+# FLOWLINE GRAPH
 # =============================================================================
 
-def build_trace_network(
-        flowlines_fc,
-        scratch_gdb):
-    """
-    Create trace network in Scratch.gdb.
-    """
+def node_key(x, y, decimals=4):
+    """ Round coordinates so nodes that should be coincident but differ by float noise or tolerance """
 
-    utils.msg(
-        "Creating trace network..."
+    return round(x, decimals), round(y, decimals)
+
+
+def build_flowline_graph(flowlines_fc):
+    """ Build directed graph from flowline start and end points with OIDs stored in edges. Flow follows the
+     digitized direction like the trace network, and lines only connect at their endpoints like simple edges """
+
+    utils.msg("Building flowline graph...")
+
+    graph = nx.MultiDiGraph()
+    line_nodes = {}
+
+    with arcpy.da.SearchCursor(flowlines_fc, ["OID@", "SHAPE@"]) as cursor:
+        for oid, shape in cursor:
+            if shape is None:
+                continue
+            start = node_key(shape.firstPoint.X, shape.firstPoint.Y)
+            end = node_key(shape.lastPoint.X, shape.lastPoint.Y)
+            graph.add_edge(start, end, oid=oid)
+            line_nodes[oid] = (start, end)
+
+    return graph, line_nodes
+
+
+def locate_pour_points(pourpoints_fc, flowlines_fc, line_nodes, sr, tolerance):
+    """ Locate each pour point on the flowlines within XY tolerance like trace network starting points and
+     barriers. Points on a line endpoint are on that junction, points along a line are on that edge. Returns
+     (OID, HUC12, junction node or None, edge OIDs) per pour point """
+
+    near_table = arcpy.analysis.GenerateNearTable(
+        pourpoints_fc, flowlines_fc, "memory/pourpoint_near", search_radius=str(tolerance), closest="ALL",
+        closest_count=0
     )
+    point_lines = defaultdict(list)
+    with arcpy.da.SearchCursor(near_table, ["IN_FID", "NEAR_FID"]) as cursor:
+        for in_fid, near_fid in cursor:
+            if near_fid in line_nodes:
+                point_lines[in_fid].append(near_fid)
+    arcpy.management.Delete(near_table)
 
-    trace_fd = os.path.join(
-        scratch_gdb,
-        "Flowline_Trace"
-    )
+    locations = []
+    with arcpy.da.SearchCursor(pourpoints_fc, ["OID@", "SHAPE@X", "SHAPE@Y", "HUC12"],
+                               spatial_reference=sr) as cursor:
+        for oid, x, y, huc12 in cursor:
+            near_lines = point_lines.get(oid, [])
+            junction = next(
+                (node for fid in near_lines for node in line_nodes[fid]
+                 if math.hypot(x - node[0], y - node[1]) <= tolerance),
+                None
+            )
+            locations.append((oid, huc12, junction, [] if junction is not None else near_lines))
 
-    utils.delete_if_exists(
-        trace_fd
-    )
-
-    sr = arcpy.Describe(
-        flowlines_fc
-    ).spatialReference
-
-    root_trace_flowlines = os.path.join(
-        scratch_gdb,
-        "Trace_Flowlines"
-    )
-
-    utils.delete_if_exists(
-        root_trace_flowlines
-    )
-
-    arcpy.management.CreateFeatureDataset(
-        scratch_gdb,
-        "Flowline_Trace",
-        sr
-    )
-
-    trace_flowlines = os.path.join(
-        trace_fd,
-        "HUC_Trace_Flowlines"
-    )
-
-    arcpy.management.CopyFeatures(
-        flowlines_fc,
-        trace_flowlines
-    )
-
-    arcpy.tn.CreateTraceNetwork(
-        trace_fd,
-        "TraceNetwork",
-        "",
-        "HUC_Trace_Flowlines SIMPLE_EDGE"
-    )
-
-    trace_network = os.path.join(
-        trace_fd,
-        "TraceNetwork"
-    )
-
-    arcpy.tn.EnableNetworkTopology(
-        trace_network
-    )
-
-    return (
-        trace_fd,
-        trace_network,
-        trace_flowlines
-    )
+    return locations
 
 # =============================================================================
 # TRACE EACH HUC12
 # =============================================================================
 
-def trace_huc12s(
-        pourpoints_fc,
-        trace_network,
-        trace_fd,
-        trace_flowlines,
-        output_gdb):
-    """
-    Trace flowlines for each HUC12.
-    """
+def trace_upstream(graph, line_nodes, starts, barrier_nodes, barrier_edges):
+    """ Upstream BFS against the digitized direction like the trace network UPSTREAM trace with barriers excluded.
+     A barrier on a junction stops the trace there, a barrier along a line stops the trace before that line and
+     leaves it out. A barrier on a starting junction blocks that start, since the trace network does not ignore
+     barriers at starting points by default. Returns the set of traced flowline OIDs """
 
-    utils.msg(
-        "Creating HUC12 traces..."
-    )
+    traced = set()
+    visited = set()
+    queue = deque()
 
-    huc12_values = sorted(
-        {
-            row[0]
-            for row in arcpy.da.SearchCursor(
-            pourpoints_fc,
-            ["HUC12"]
-        )
-            if row[0]
-        }
-    )
+    for junction, edge_oids in starts:
+        if junction is not None:
+            if junction not in barrier_nodes and junction not in visited:
+                visited.add(junction)
+                queue.append(junction)
+            continue
+
+        # Starting along a line includes that line, then continues from its upstream end
+        for edge_oid in edge_oids:
+            traced.add(edge_oid)
+            upstream_end = line_nodes[edge_oid][0]
+            if edge_oid in barrier_edges or upstream_end in barrier_nodes or upstream_end in visited:
+                continue
+            visited.add(upstream_end)
+            queue.append(upstream_end)
+
+    while queue:
+        node = queue.popleft()
+
+        for upstream_node, _, edge_attrs in graph.in_edges(node, data=True):
+            if edge_attrs["oid"] in barrier_edges:
+                continue
+            traced.add(edge_attrs["oid"])
+            if upstream_node in barrier_nodes or upstream_node in visited:
+                continue
+            visited.add(upstream_node)
+            queue.append(upstream_node)
+
+    return traced
+
+
+def trace_huc12s(graph, line_nodes, locations):
+    """ Trace flowlines upstream for each HUC12 from its pour points, with the pour points of every other HUC12 as
+     barriers. Returns the traced flowline OIDs per HUC12 """
+
+    utils.msg("Creating HUC12 traces...")
+
+    huc12_values = sorted({location[1] for location in locations if location[1]})
+    huc_oids = {}
 
     for huc12 in huc12_values:
+        utils.msg(f"Tracing {huc12}")
 
-        utils.msg(
-            f"Tracing {huc12}"
-        )
+        starts = [(location[2], location[3]) for location in locations if location[1] == huc12]
 
-        start_pts = os.path.join(
-            trace_fd,
-            "start_pts"
-        )
+        # Null HUC12 pour points are not barriers, matching the HUC12 <> SQL used for the trace network barriers
+        barrier_nodes = set()
+        barrier_edges = set()
+        for _, point_huc, junction, edge_oids in locations:
+            if point_huc is None or point_huc == huc12:
+                continue
+            if junction is not None:
+                barrier_nodes.add(junction)
+            barrier_edges.update(edge_oids)
 
-        stop_pts = os.path.join(
-            trace_fd,
-            "stop_pts"
-        )
+        traced = trace_upstream(graph, line_nodes, starts, barrier_nodes, barrier_edges)
 
-        utils.delete_if_exists(
-            start_pts
-        )
+        if not traced:
+            located = [start for start in starts if start[0] is not None or start[1]]
+            if not located:
+                reason = "pour point is not on a flowline"
+            elif all(start[0] in barrier_nodes for start in located):
+                reason = "pour point shares a junction with another HUC12 pour point"
+            else:
+                reason = "no flowlines upstream of pour point"
+            utils.warn(f"No flowlines traced for {huc12}, {reason}.")
 
-        utils.delete_if_exists(
-            stop_pts
-        )
+        huc_oids[huc12] = traced
 
-        huc_field = arcpy.AddFieldDelimiters(
-            pourpoints_fc,
-            "HUC12"
-        )
-
-        start_sql = (
-            f"{huc_field} = '{huc12}'"
-        )
-
-        stop_sql = (
-            f"{huc_field} <> '{huc12}'"
-        )
-
-        arcpy.analysis.Select(
-            pourpoints_fc,
-            start_pts,
-            start_sql
-        )
-
-        arcpy.analysis.Select(
-            pourpoints_fc,
-            stop_pts,
-            stop_sql
-        )
-
-        trace_result = arcpy.tn.Trace(
-            in_trace_network=trace_network,
-            trace_type="UPSTREAM",
-            starting_points=start_pts,
-            barriers=stop_pts,
-            include_barriers="EXCLUDE_BARRIERS",
-            result_types="NETWORK_LAYERS",
-            out_network_layer="TRACED"
-        )
-
-        traced_lines = "TRACED/HUC_Trace_Flowlines"
-
-        output_fc = os.path.join(
-            output_gdb,
-            f"HU_{huc12}"
-        )
-
-        utils.delete_if_exists(
-            output_fc
-        )
-
-        arcpy.management.MakeFeatureLayer(
-            "TRACED/HUC_Trace_Flowlines",
-            "traced_lines_lyr"
-        )
-
-        arcpy.management.CopyFeatures(
-            "traced_lines_lyr",
-            output_fc
-        )
-
-        field_names = [
-            f.name
-            for f in arcpy.ListFields(
-                output_fc
-            )
-        ]
-
-        if "HUC12" not in field_names:
-            arcpy.management.AddField(
-                output_fc,
-                "HUC12",
-                "TEXT",
-                field_length=12
-            )
-
-        arcpy.management.CalculateField(
-            output_fc,
-            "HUC12",
-            f'"{huc12}"',
-            "PYTHON3"
-        )
-
-        utils.delete_if_exists(
-            start_pts
-        )
-
-        utils.delete_if_exists(
-            stop_pts
-        )
+    return huc_oids
 
 # =============================================================================
-# MERGE OUTPUTS
+# WRITE OUTPUTS
 # =============================================================================
 
-def merge_huc12_flowlines(
-        output_gdb):
-    """
-    Merge all HU_* feature classes into a
-    single output feature class.
-    """
+def write_huc12_flowlines(flowlines_fc, huc_oids, output_gdb, sr):
+    """ Write the traced flowlines of every HUC12 to the merged feature class in one pass over the flowlines, then
+     select each HUC12 into its own HU_ feature class. Flowlines traced by more than one HUC12 are written once per
+     HUC12 like the trace network outputs, so the identical flowline QC still catches them """
 
-    utils.msg(
-        "Merging HUC12 flowlines..."
+    utils.msg("Writing HUC12 flowlines...")
+
+    if not huc_oids:
+        raise ValueError("No HUC12 flowline feature classes found.")
+
+    merged_fc = os.path.join(output_gdb, "MERGED_Flowlines_by_HU12")
+    utils.delete_if_exists(merged_fc)
+    arcpy.management.CreateFeatureclass(
+        output_gdb, "MERGED_Flowlines_by_HU12", "POLYLINE", template=flowlines_fc, has_m="SAME_AS_TEMPLATE",
+        has_z="SAME_AS_TEMPLATE", spatial_reference=sr
     )
 
-    arcpy.env.workspace = output_gdb
+    # Copy every editable attribute, HUC12 is added when the flowlines do not already have it
+    copy_fields = [field.name for field in arcpy.ListFields(flowlines_fc)
+                   if field.editable and field.type not in ("OID", "Geometry", "GlobalID")]
+    huc_field = next((name for name in copy_fields if name.upper() == "HUC12"), None)
+    if huc_field is None:
+        huc_field = "HUC12"
+        arcpy.management.AddField(merged_fc, huc_field, "TEXT", field_length=12)
+        insert_fields = ["SHAPE@"] + copy_fields + [huc_field]
+    else:
+        insert_fields = ["SHAPE@"] + copy_fields
+    huc_index = insert_fields.index(huc_field)
+    huc_padding = [None] * (len(insert_fields) - len(copy_fields) - 1)
 
-    feature_classes = arcpy.ListFeatureClasses(
-        "HU_*"
-    )
+    oid_hucs = defaultdict(list)
+    for traced_huc in sorted(huc_oids):
+        for traced_oid in huc_oids[traced_huc]:
+            oid_hucs[traced_oid].append(traced_huc)
 
-    if not feature_classes:
+    with arcpy.da.SearchCursor(flowlines_fc, ["OID@", "SHAPE@"] + copy_fields) as search_cursor, \
+            arcpy.da.InsertCursor(merged_fc, insert_fields) as insert_cursor:
+        for source_row in search_cursor:
+            for row_huc in oid_hucs.get(source_row[0], []):
+                merged_row = list(source_row[1:]) + huc_padding
+                merged_row[huc_index] = row_huc
+                insert_cursor.insertRow(merged_row)
 
-        raise ValueError(
-            "No HUC12 flowline feature classes found."
-        )
-
-    merged_fc = os.path.join(
-        output_gdb,
-        "MERGED_Flowlines_by_HU12"
-    )
-
-    utils.delete_if_exists(
-        merged_fc
-    )
-
-    arcpy.management.Merge(
-        feature_classes,
-        merged_fc
-    )
+    # Index HUC12 so each HU_ selection does not scan the whole merged feature class
+    arcpy.management.AddIndex(merged_fc, huc_field, "HUC12_IDX")
+    huc_sql_field = arcpy.AddFieldDelimiters(merged_fc, huc_field)
+    for huc12 in sorted(huc_oids):
+        output_fc = os.path.join(output_gdb, f"HU_{huc12}")
+        utils.delete_if_exists(output_fc)
+        arcpy.analysis.Select(merged_fc, output_fc, f"{huc_sql_field} = '{huc12}'")
 
     return merged_fc
 
@@ -463,13 +415,9 @@ def validate_trace_coverage(
 # MAIN
 # =============================================================================
 
-def main():
+def main(user_workspace):
 
     arcpy.env.overwriteOutput = True
-
-    user_workspace = (
-        arcpy.GetParameterAsText(0)
-    )
 
     utils.separator()
 
@@ -492,38 +440,23 @@ def main():
         )
     )
 
-    scratch_gdb = (
-        utils.get_scratch_gdb(
-            user_workspace
-        )
-    )
-
     output_gdb = (
         create_output_gdb(
             user_workspace
         )
     )
 
-    (
-        trace_fd,
-        trace_network,
-        trace_flowlines
-    ) = build_trace_network(
-        flowlines_fc,
-        scratch_gdb
-    )
+    # Trace network topology connects within the XY tolerance, so pour points are located with it too
+    sr = arcpy.Describe(flowlines_fc).spatialReference
+    tolerance = sr.XYTolerance
 
-    trace_huc12s(
-        pourpoints_fc,
-        trace_network,
-        trace_fd,
-        trace_flowlines,
-        output_gdb
-    )
+    graph, line_nodes = build_flowline_graph(flowlines_fc)
 
-    merged_fc = merge_huc12_flowlines(
-        output_gdb
-    )
+    locations = locate_pour_points(pourpoints_fc, flowlines_fc, line_nodes, sr, tolerance)
+
+    huc_oids = trace_huc12s(graph, line_nodes, locations)
+
+    merged_fc = write_huc12_flowlines(flowlines_fc, huc_oids, output_gdb, sr)
 
     validate_identical_lines(
         merged_fc
@@ -535,10 +468,6 @@ def main():
         output_gdb
     )
 
-    utils.delete_if_exists(
-        trace_fd
-    )
-
     utils.separator()
 
     utils.msg(
@@ -548,5 +477,10 @@ def main():
     utils.separator()
 
 if __name__ == "__main__":
-    main()
+    # Use toolbox parameter when run as a script tool, otherwise fall back to the path below
+    if arcpy.GetParameterAsText(0):
+        workspace_path = arcpy.GetParameterAsText(0)
+    else:
+        workspace_path = r""
 
+    main(workspace_path)
