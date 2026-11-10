@@ -39,6 +39,69 @@ def create_output_gdb(user_workspace):
     return output_gdb
 
 # =============================================================================
+# HELPERS
+# =============================================================================
+
+def delete_if_exists(dataset):
+
+    if arcpy.Exists(dataset):
+
+        arcpy.management.Delete(
+            dataset
+        )
+
+# =============================================================================
+# CLEANUP
+# =============================================================================
+
+def cleanup_trace_artifacts(
+        scratch_gdb):
+
+    artifacts = [
+
+        # Feature dataset
+        os.path.join(
+            scratch_gdb,
+            "Flowline_Trace"
+        ),
+
+        # Root-level relics
+        os.path.join(
+            scratch_gdb,
+            "HUC_Trace_Flowlines"
+        ),
+
+        os.path.join(
+            scratch_gdb,
+            "start_pts"
+        ),
+
+        os.path.join(
+            scratch_gdb,
+            "stop_pts"
+        )
+    ]
+
+    for item in artifacts:
+
+        utils.delete_if_exists(
+            item
+        )
+
+    for layer in [
+
+        "TRACED",
+        "traced_lines_lyr"
+
+    ]:
+
+        if arcpy.Exists(layer):
+
+            arcpy.management.Delete(
+                layer
+            )
+
+# =============================================================================
 # TRACE NETWORK
 # =============================================================================
 
@@ -51,6 +114,10 @@ def build_trace_network(
 
     utils.msg(
         "Creating trace network..."
+    )
+
+    cleanup_trace_artifacts(
+        scratch_gdb
     )
 
     trace_fd = os.path.join(
@@ -68,11 +135,20 @@ def build_trace_network(
 
     root_trace_flowlines = os.path.join(
         scratch_gdb,
-        "Trace_Flowlines"
+        "HUC_Trace_Flowlines"
     )
 
     utils.delete_if_exists(
         root_trace_flowlines
+    )
+
+    trace_fd = os.path.join(
+        scratch_gdb,
+        "Flowline_Trace"
+    )
+
+    utils.delete_if_exists(
+        trace_fd
     )
 
     arcpy.management.CreateFeatureDataset(
@@ -122,9 +198,14 @@ def trace_huc12s(
         trace_network,
         trace_fd,
         trace_flowlines,
-        output_gdb):
+        output_gdb,
+        scratch_gdb):
     """
     Trace flowlines for each HUC12.
+
+    Invalid or unsnapped pour points are
+    skipped and reported without stopping
+    the overall process.
     """
 
     utils.msg(
@@ -135,9 +216,9 @@ def trace_huc12s(
         {
             row[0]
             for row in arcpy.da.SearchCursor(
-            pourpoints_fc,
-            ["HUC12"]
-        )
+                pourpoints_fc,
+                ["HUC12"]
+            )
             if row[0]
         }
     )
@@ -158,100 +239,256 @@ def trace_huc12s(
             "stop_pts"
         )
 
-        utils.delete_if_exists(
-            start_pts
-        )
-
-        utils.delete_if_exists(
-            stop_pts
-        )
-
-        huc_field = arcpy.AddFieldDelimiters(
-            pourpoints_fc,
-            "HUC12"
-        )
-
-        start_sql = (
-            f"{huc_field} = '{huc12}'"
-        )
-
-        stop_sql = (
-            f"{huc_field} <> '{huc12}'"
-        )
-
-        arcpy.analysis.Select(
-            pourpoints_fc,
-            start_pts,
-            start_sql
-        )
-
-        arcpy.analysis.Select(
-            pourpoints_fc,
-            stop_pts,
-            stop_sql
-        )
-
-        trace_result = arcpy.tn.Trace(
-            in_trace_network=trace_network,
-            trace_type="UPSTREAM",
-            starting_points=start_pts,
-            barriers=stop_pts,
-            include_barriers="EXCLUDE_BARRIERS",
-            result_types="NETWORK_LAYERS",
-            out_network_layer="TRACED"
-        )
-
-        traced_lines = "TRACED/HUC_Trace_Flowlines"
-
         output_fc = os.path.join(
             output_gdb,
             f"HU_{huc12}"
         )
 
-        utils.delete_if_exists(
-            output_fc
-        )
+        try:
 
-        arcpy.management.MakeFeatureLayer(
-            "TRACED/HUC_Trace_Flowlines",
-            "traced_lines_lyr"
-        )
+            # ---------------------------------------------------------
+            # Cleanup prior iteration artifacts
+            # ---------------------------------------------------------
 
-        arcpy.management.CopyFeatures(
-            "traced_lines_lyr",
-            output_fc
-        )
+            for item in [
 
-        field_names = [
-            f.name
-            for f in arcpy.ListFields(
+                start_pts,
+                stop_pts,
+                output_fc
+
+            ]:
+
+                utils.delete_if_exists(
+                    item
+                )
+
+            for layer in [
+
+                "TRACED",
+                "traced_lines_lyr"
+
+            ]:
+
+                if arcpy.Exists(
+                        layer):
+
+                    arcpy.management.Delete(
+                        layer
+                    )
+
+            # ---------------------------------------------------------
+            # Create start / stop points
+            # ---------------------------------------------------------
+
+            huc_field = (
+                arcpy.AddFieldDelimiters(
+                    pourpoints_fc,
+                    "HUC12"
+                )
+            )
+
+            start_sql = (
+                f"{huc_field} = '{huc12}'"
+            )
+
+            stop_sql = (
+                f"{huc_field} <> '{huc12}'"
+            )
+
+            arcpy.analysis.Select(
+                pourpoints_fc,
+                start_pts,
+                start_sql
+            )
+
+            arcpy.analysis.Select(
+                pourpoints_fc,
+                stop_pts,
+                stop_sql
+            )
+
+            start_count = int(
+                arcpy.management.GetCount(
+                    start_pts
+                ).getOutput(0)
+            )
+
+            if start_count == 0:
+
+                utils.warn(
+                    f"Skipping {huc12}: "
+                    f"No pour point found."
+                )
+
+                continue
+
+            if start_count > 1:
+
+                utils.warn(
+                    f"Skipping {huc12}: "
+                    f"{start_count} starting points "
+                    f"were found. Expected 1."
+                )
+
+                continue
+
+            # ---------------------------------------------------------
+            # Trace
+            # ---------------------------------------------------------
+
+            try:
+
+                arcpy.tn.Trace(
+                    in_trace_network=trace_network,
+                    trace_type="UPSTREAM",
+                    starting_points=start_pts,
+                    barriers=stop_pts,
+                    include_barriers="EXCLUDE_BARRIERS",
+                    result_types="NETWORK_LAYERS",
+                    out_network_layer="TRACED"
+                )
+
+            except arcpy.ExecuteError:
+
+                error_text = (
+                    arcpy.GetMessages(2)
+                )
+
+                if (
+                    "No valid starting points found"
+                    in error_text
+                ):
+
+                    utils.warn(
+                        f"Skipping {huc12}: "
+                        f"Pour point is not a valid "
+                        f"Trace Network starting "
+                        f"location. Verify it is "
+                        f"snapped to a connected "
+                        f"flowline."
+                    )
+
+                    continue
+
+                utils.warn(
+                    f"Trace failed for "
+                    f"{huc12}: "
+                    f"{error_text}"
+                )
+
+                continue
+
+            # ---------------------------------------------------------
+            # Validate trace output
+            # ---------------------------------------------------------
+
+            traced_lines = (
+                "TRACED/HUC_Trace_Flowlines"
+            )
+
+            if not arcpy.Exists(
+                    traced_lines):
+
+                utils.warn(
+                    f"Skipping {huc12}: "
+                    f"Trace returned no "
+                    f"network layer."
+                )
+
+                continue
+
+            trace_count = int(
+                arcpy.management.GetCount(
+                    traced_lines
+                ).getOutput(0)
+            )
+
+            if trace_count == 0:
+
+                utils.warn(
+                    f"Skipping {huc12}: "
+                    f"Trace returned zero "
+                    f"flowlines."
+                )
+
+                continue
+
+            # ---------------------------------------------------------
+            # Export flowlines
+            # ---------------------------------------------------------
+
+            arcpy.management.MakeFeatureLayer(
+                traced_lines,
+                "traced_lines_lyr"
+            )
+
+            arcpy.management.CopyFeatures(
+                "traced_lines_lyr",
                 output_fc
             )
-        ]
 
-        if "HUC12" not in field_names:
-            arcpy.management.AddField(
+            field_names = [
+                f.name
+                for f in arcpy.ListFields(
+                    output_fc
+                )
+            ]
+
+            if "HUC12" not in field_names:
+
+                arcpy.management.AddField(
+                    output_fc,
+                    "HUC12",
+                    "TEXT",
+                    field_length=12
+                )
+
+            arcpy.management.CalculateField(
                 output_fc,
                 "HUC12",
-                "TEXT",
-                field_length=12
+                f'"{huc12}"',
+                "PYTHON3"
             )
 
-        arcpy.management.CalculateField(
-            output_fc,
-            "HUC12",
-            f'"{huc12}"',
-            "PYTHON3"
-        )
+            utils.msg(
+                f"Created HU_{huc12} "
+                f"({trace_count:,} traced features)"
+            )
 
-        utils.delete_if_exists(
-            start_pts
-        )
+        except Exception as ex:
 
-        utils.delete_if_exists(
-            stop_pts
-        )
+            utils.warn(
+                f"Unexpected error while "
+                f"processing {huc12}: "
+                f"{ex}"
+            )
 
+        finally:
+
+            for item in [
+
+                start_pts,
+                stop_pts
+
+            ]:
+
+                utils.delete_if_exists(
+                    item
+                )
+
+            for layer in [
+
+                "TRACED",
+                "traced_lines_lyr"
+
+            ]:
+
+                if arcpy.Exists(
+                        layer):
+
+                    arcpy.management.Delete(
+                        layer
+                    )
 # =============================================================================
 # MERGE OUTPUTS
 # =============================================================================
@@ -498,6 +735,10 @@ def main():
         )
     )
 
+    cleanup_trace_artifacts(
+        scratch_gdb
+    )
+
     output_gdb = (
         create_output_gdb(
             user_workspace
@@ -518,7 +759,8 @@ def main():
         trace_network,
         trace_fd,
         trace_flowlines,
-        output_gdb
+        output_gdb,
+        scratch_gdb
     )
 
     merged_fc = merge_huc12_flowlines(
