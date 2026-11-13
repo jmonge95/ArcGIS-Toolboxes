@@ -20,21 +20,45 @@ import catchment_utils as utils
 # OUTPUT GDB
 # =============================================================================
 
-def create_output_gdb(user_workspace):
+def create_output_gdb(
+        user_workspace,
+        run_subset=False):
 
-    output_gdb = utils.get_flowlines_by_huc_gdb(
-        user_workspace
+    output_gdb = (
+        utils.get_flowlines_by_huc_gdb(
+            user_workspace
+        )
     )
 
-    if arcpy.Exists(output_gdb):
-        arcpy.management.Delete(
-            output_gdb
+    if not run_subset:
+
+        if arcpy.Exists(
+                output_gdb):
+
+            arcpy.management.Delete(
+                output_gdb
+            )
+
+        arcpy.management.CreateFileGDB(
+            os.path.dirname(
+                output_gdb
+            ),
+            os.path.basename(
+                output_gdb
+            )
         )
 
-    arcpy.management.CreateFileGDB(
-        os.path.dirname(output_gdb),
-        os.path.basename(output_gdb)
-    )
+    elif not arcpy.Exists(
+            output_gdb):
+
+        arcpy.management.CreateFileGDB(
+            os.path.dirname(
+                output_gdb
+            ),
+            os.path.basename(
+                output_gdb
+            )
+        )
 
     return output_gdb
 
@@ -105,11 +129,19 @@ def cleanup_trace_artifacts(
 # TRACE NETWORK
 # =============================================================================
 
+# =============================================================================
+# TRACE NETWORK
+# =============================================================================
+
 def build_trace_network(
         flowlines_fc,
         scratch_gdb):
     """
     Create trace network in Scratch.gdb.
+
+    A temporary 2D copy of the input flowlines is created
+    to ensure the Trace Network is built from XY geometry
+    only (no Z-values).
     """
 
     utils.msg(
@@ -120,41 +152,18 @@ def build_trace_network(
         scratch_gdb
     )
 
-    trace_fd = os.path.join(
-        scratch_gdb,
-        "Flowline_Trace"
-    )
-
-    utils.delete_if_exists(
-        trace_fd
-    )
-
     sr = arcpy.Describe(
         flowlines_fc
     ).spatialReference
 
-    root_trace_flowlines = os.path.join(
-        scratch_gdb,
-        "HUC_Trace_Flowlines"
-    )
-
-    utils.delete_if_exists(
-        root_trace_flowlines
-    )
-
     trace_fd = os.path.join(
         scratch_gdb,
         "Flowline_Trace"
     )
 
-    utils.delete_if_exists(
-        trace_fd
-    )
-
-    arcpy.management.CreateFeatureDataset(
-        scratch_gdb,
-        "Flowline_Trace",
-        sr
+    trace_network = os.path.join(
+        trace_fd,
+        "TraceNetwork"
     )
 
     trace_flowlines = os.path.join(
@@ -162,10 +171,59 @@ def build_trace_network(
         "HUC_Trace_Flowlines"
     )
 
+    flowlines_2d = os.path.join(
+        scratch_gdb,
+        "HUC_Trace_Flowlines_2D"
+    )
+
+    # -----------------------------------------------------------------
+    # Cleanup
+    # -----------------------------------------------------------------
+
+    utils.delete_if_exists(
+        flowlines_2d
+    )
+
+    utils.delete_if_exists(
+        trace_fd
+    )
+
+    # -----------------------------------------------------------------
+    # Create temporary 2D copy (drops Z and M values)
+    # -----------------------------------------------------------------
+
+    with arcpy.EnvManager(
+            outputZFlag="Disabled",
+            outputMFlag="Disabled"):
+
+        arcpy.conversion.FeatureClassToFeatureClass(
+            flowlines_fc,
+            scratch_gdb,
+            "HUC_Trace_Flowlines_2D"
+        )
+
+    # -----------------------------------------------------------------
+    # Create feature dataset
+    # -----------------------------------------------------------------
+
+    arcpy.management.CreateFeatureDataset(
+        scratch_gdb,
+        "Flowline_Trace",
+        sr
+    )
+
+    # -----------------------------------------------------------------
+    # Import 2D flowlines into trace feature dataset
+    # -----------------------------------------------------------------
+
     arcpy.management.CopyFeatures(
-        flowlines_fc,
+        flowlines_2d,
         trace_flowlines
     )
+
+    # -----------------------------------------------------------------
+    # Create trace network
+    # -----------------------------------------------------------------
 
     arcpy.tn.CreateTraceNetwork(
         trace_fd,
@@ -174,13 +232,20 @@ def build_trace_network(
         "HUC_Trace_Flowlines SIMPLE_EDGE"
     )
 
-    trace_network = os.path.join(
-        trace_fd,
-        "TraceNetwork"
-    )
+    # -----------------------------------------------------------------
+    # Enable topology
+    # -----------------------------------------------------------------
 
     arcpy.tn.EnableNetworkTopology(
         trace_network
+    )
+
+    # -----------------------------------------------------------------
+    # Cleanup temporary 2D copy
+    # -----------------------------------------------------------------
+
+    utils.delete_if_exists(
+        flowlines_2d
     )
 
     return (
@@ -199,7 +264,8 @@ def trace_huc12s(
         trace_fd,
         trace_flowlines,
         output_gdb,
-        scratch_gdb):
+        run_subset=False,
+        subset_hucs=None):
     """
     Trace flowlines for each HUC12.
 
@@ -214,14 +280,54 @@ def trace_huc12s(
 
     huc12_values = sorted(
         {
-            row[0]
+            str(row[0]).strip()
             for row in arcpy.da.SearchCursor(
-                pourpoints_fc,
-                ["HUC12"]
-            )
+            pourpoints_fc,
+            ["HUC12"]
+        )
             if row[0]
         }
     )
+
+    # ---------------------------------------------------------
+    # Optional subset processing
+    # ---------------------------------------------------------
+
+    if run_subset and subset_hucs:
+        requested_hucs = {
+
+            h.strip()
+
+            for h in subset_hucs.split(",")
+
+            if h.strip()
+        }
+
+        huc12_values = [
+
+            h
+
+            for h in huc12_values
+
+            if h in requested_hucs
+        ]
+
+        utils.msg(
+            f"Subset mode enabled "
+            f"({len(huc12_values)} HUC12s)"
+        )
+
+        utils.msg(
+            "HUC12s to process:"
+        )
+
+        utils.msg(
+            ", ".join(huc12_values)
+        )
+
+    # ---------------------------------------------------------
+    # Trace HUCs
+    # ---------------------------------------------------------
 
     for huc12 in huc12_values:
 
@@ -318,16 +424,6 @@ def trace_huc12s(
                 utils.warn(
                     f"Skipping {huc12}: "
                     f"No pour point found."
-                )
-
-                continue
-
-            if start_count > 1:
-
-                utils.warn(
-                    f"Skipping {huc12}: "
-                    f"{start_count} starting points "
-                    f"were found. Expected 1."
                 )
 
                 continue
@@ -708,6 +804,10 @@ def main():
         arcpy.GetParameterAsText(0)
     )
 
+    run_subset = arcpy.GetParameter(1)
+
+    subset_hucs = arcpy.GetParameterAsText(2)
+
     utils.separator()
 
     utils.msg(
@@ -741,7 +841,8 @@ def main():
 
     output_gdb = (
         create_output_gdb(
-            user_workspace
+            user_workspace,
+            run_subset
         )
     )
 
@@ -760,7 +861,8 @@ def main():
         trace_fd,
         trace_flowlines,
         output_gdb,
-        scratch_gdb
+        run_subset,
+        subset_hucs
     )
 
     merged_fc = merge_huc12_flowlines(

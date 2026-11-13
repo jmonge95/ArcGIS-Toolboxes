@@ -275,7 +275,7 @@ def get_pourpoints_fc(
         get_pourpoints_gdb(
             workspace
         ),
-        "PourPoints"
+        "HUC12_pour_points"
     )
 
 def get_streams_folder(workspace):
